@@ -1,0 +1,6 @@
+# 运行所需依赖（Python 3.8+）
+pdfplumber>=0.10.0
+pandas>=1.5.0
+
+# 可选：运行 tests/ 冒烟测试
+pytest>=7.0

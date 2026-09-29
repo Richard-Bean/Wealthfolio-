@@ -1,0 +1,22 @@
+# ===== 敏感数据：禁止上传（含个人财务与身份信息）=====
+# 蚂蚁财富交割单 PDF（含姓名、身份证号、全部交易记录）
+data/input/*.pdf
+# 生成的持仓/流水 CSV（个人资产数据）
+data/output/*.csv
+
+# ===== 保留目录结构占位（克隆后目录仍然存在）=====
+!data/input/.gitkeep
+!data/output/.gitkeep
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== 系统与编辑器 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
