@@ -1,0 +1,16 @@
+# FinanceBot 全局配置
+# agent / connectors / core 的统一配置入口；路径均为仓库根相对路径。
+data:
+  raw_dir: data/raw              # 各来源原始数据（交割单、银行流水等）
+  processed_dir: data/processed  # 标准化处理产物
+  export_dir: data/export        # 待导出 / 同步给外部系统的文件
+
+connectors:
+  alipay:
+    enabled: true
+    account_name: "蚂蚁财富"    # Wealthfolio 导入时使用的账户名
+    fetch_nav: true            # 是否联网拉取最新净值（天天基金公开接口）；false = 完全离线
+    verbose_nav: true          # 净值拉取失败时是否打印每只基金的降级提示
+    input_dir: data/raw/alipay        # 交割单 PDF 投放目录
+    output_dir: data/processed/alipay # CSV 产物目录
+    default_pdf: "交割单.pdf"          # input_dir 下无唯一 PDF 时的回退文件名

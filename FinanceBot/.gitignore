@@ -1,0 +1,13 @@
+# ===== 敏感数据：禁止上传（含个人财务与身份信息）=====
+# 蚂蚁财富交割单 PDF（含姓名、身份证号、全部交易记录）
+data/raw/alipay/*.pdf
+# 生成的持仓/流水 CSV（个人资产数据）
+data/processed/alipay/*.csv
+
+# ===== 保留目录结构占位（克隆后目录仍然存在）=====
+!data/raw/alipay/.gitkeep
+!data/processed/alipay/.gitkeep
+
+# ===== 运行日志 =====
+logs/*.log
+!logs/.gitkeep

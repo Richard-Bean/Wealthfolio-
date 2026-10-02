@@ -131,9 +131,9 @@ def parse_statement_pdf(pdf_path: str) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    # 调试入口：python3 src/statement_parser.py <pdf路径>
+    # 调试入口：python connectors/alipay/statement_parser.py <pdf路径>
     import sys
-    path = sys.argv[1] if len(sys.argv) > 1 else "data/input/交割单.pdf"
+    path = sys.argv[1] if len(sys.argv) > 1 else "../../data/raw/alipay/交割单.pdf"
     df = parse_statement_pdf(path)
     print(f"共 {len(df)} 笔交易")
     print(df.head(10).to_string(index=False))

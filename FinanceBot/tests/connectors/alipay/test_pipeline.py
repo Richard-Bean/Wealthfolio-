@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-test_pipeline.py —— 冒烟测试（不依赖真实 PDF 与网络）
+test_pipeline.py —— 支付宝连接器冒烟测试（不依赖真实 PDF 与网络）
 
-运行: python3 -m pytest tests/ -v   或   python3 tests/test_pipeline.py
+运行: python -m pytest tests/ -v   或   python tests/connectors/alipay/test_pipeline.py
 覆盖:
   1. 摊薄成本计算：买入/卖出/转换转入转出
   2. Wealthfolio 导出：buy/sell 活动与成本口径
@@ -11,13 +11,17 @@ test_pipeline.py —— 冒烟测试（不依赖真实 PDF 与网络）
 
 import os
 import sys
+import tempfile
+from pathlib import Path
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, BASE_DIR)
+# 仓库根 = tests -> connectors -> alipay -> 仓库根（向上 3 级）
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT))
 
 import pandas as pd  # noqa: E402
 
-from src import position_calculator, exporter, validator  # noqa: E402
+from core.normalizer import position_calculator, validator  # noqa: E402
+from connectors.wealthfolio import exporter as wf_exporter  # noqa: E402
 
 
 def _sample_trades() -> pd.DataFrame:
@@ -62,11 +66,11 @@ def test_positions():
 
 def test_wealthfolio_export(tmp_path=None):
     trades = _sample_trades()
-    out = os.path.join(tmp_path or "/tmp", "wf_test.csv")
-    exporter.export_wealthfolio_csv(trades, out, account="测试账户")
+    out = os.path.join(str(tmp_path) if tmp_path else tempfile.gettempdir(), "wf_test.csv")
+    wf_exporter.export_wealthfolio_csv(trades, out, account="测试账户")
 
     wf = pd.read_csv(out, dtype={"symbol": str})  # symbol 是基金代码，必须按文本读，避免前导零丢失
-    assert set(wf.columns) == set(exporter.WEALTHFOLIO_COLUMNS)
+    assert set(wf.columns) == set(wf_exporter.WEALTHFOLIO_COLUMNS)
     assert (wf["activityType"].value_counts().to_dict()) == {"buy": 4, "sell": 2}
     # 买入成本口径：amount = 确认金额 - 手续费
     buy_a = wf[(wf["symbol"] == "000001") & (wf["activityType"] == "buy")].iloc[0]
