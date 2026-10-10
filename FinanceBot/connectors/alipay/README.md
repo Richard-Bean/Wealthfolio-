@@ -88,3 +88,46 @@ connectors/alipay/
 - QDII 基金净值更新滞后（T+1~T+2），`fund_positions.csv` 中的「净值日期」会标注实际净值归属日。
 - 持仓市值 = 份额 × 最新净值，与支付宝 APP 实时估值可能存在小幅差异（口径不同）。
 - 交割单默认仅覆盖申请的时间段；跨多年持仓需分时段申请多份 PDF，分别运行后自行合并。
+
+
+## 截图获取方式
+
+截图保存位置：
+
+```text
+data/raw/alipay/
+```
+
+操作路径：
+
+> 打开支付宝，点击下方“理财”，下拉总资产后点击“基金”，再点击“我的总资产”进行截图。
+
+需要保留基金名称、持有金额、持有收益和持有收益率。关键数字的打码样式参考：
+
+```text
+FinanceBot/docs/templates/持仓截图模板_打码.jpg
+```
+
+
+## 截图一键转换（不使用交易流水）
+
+将新截图放入 `data/raw/alipay/`，双击：
+
+```text
+运行截图转CSV.bat
+```
+
+流水线会自动完成：
+
+```text
+截图 -> Windows OCR -> 结构化持仓 JSON -> 公开净值API -> 持有份额/平均成本 -> Wealthfolio CSV
+```
+
+输出：
+
+```text
+data/processed/alipay/wealthfolio_import_auto.csv
+data/export/wealthfolio_import_auto.csv
+```
+
+支持右键“以管理员身份运行”之外的普通双击。也可以把图片路径作为参数传给 BAT。若布局不是支付宝/养基宝“我的持有”列表布局，需要新增 OCR 布局适配规则。

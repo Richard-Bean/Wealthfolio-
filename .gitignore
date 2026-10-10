@@ -13,3 +13,9 @@ Thumbs.db
 .vscode/
 
 # 项目代码与敏感数据规则见 FinanceBot/.gitignore
+
+# ===== OCR / 净值缓存中间文件 =====
+.paddlex-cache/
+pytest-cache-files-*/
+*_ocr.txt
+snapshot_input.auto.json

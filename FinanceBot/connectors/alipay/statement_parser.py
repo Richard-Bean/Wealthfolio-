@@ -20,7 +20,8 @@ statement_parser.py —— 蚂蚁财富「基金交易明细」交割单 PDF 解
 """
 
 import re
-from typing import List
+from datetime import date, timedelta
+from typing import List, Optional
 
 import pandas as pd
 import pdfplumber
@@ -70,11 +71,50 @@ def _to_date(cell) -> str:
     """
     蚂蚁交割单日期格式形如「2026/09/29 00:00」或「2026/09/24 11:05」，
     统一为「2026-09-29」；解析失败返回空串。
+
+    注意：PDF 排版可能把日期拆成两行，例如「2026/06/1\n6 00:00」。
+    本函数只解析已经完整落入单元格的日期；残缺日期由
+    `_infer_confirm_date()` 根据订单号兜底，避免整笔交易被丢弃。
     """
-    m = re.search(r"(\d{4})/(\d{2})/(\d{2})", _clean_text(cell))
+    m = re.search(r"(\d{4})/(\d{1,2})/(\d{1,2})", _clean_text(cell))
     if not m:
         return ""
-    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+
+
+def _order_date(order_no: str) -> Optional[date]:
+    """从订单号前缀 YYYYMMDD 提取交易日期；失败返回 None。"""
+    m = re.match(r"(\d{4})(\d{2})(\d{2})", _clean_text(order_no))
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def _infer_confirm_date(row: list, biz_type: str, apply_amount: float, apply_shares: float) -> str:
+    """
+    推导确认日期。
+
+    实测交割单存在日期单元格被裁切成「2026/06/1」的情况（例如 013308
+    2026-06-15 的定投买入），直接解析会得到空值或错误的 06-01。
+    当日期残缺且订单号包含完整交易日期时，按蚂蚁基金确认惯例：
+    金额申购（买入/转入）通常 T+1 确认；其他情况先用交易日期兜底。
+    """
+    raw = _clean_text(row[_IDX_CONFIRM_DATE])
+    parsed = _to_date(raw)
+    order_dt = _order_date(row[_IDX_ORDER_NO])
+    has_time = bool(re.search(r"\d{1,2}:\d{2}", raw))
+
+    # 带时间的完整日期可信；只有纯残缺日期才走订单号兜底。
+    if parsed and (has_time or order_dt is None or parsed >= order_dt.isoformat()):
+        return parsed
+    if order_dt is None:
+        return parsed
+    is_buy_like = apply_shares == 0 and apply_amount > 0
+    inferred = order_dt + timedelta(days=1 if is_buy_like else 0)
+    return inferred.isoformat()
 
 
 def parse_statement_pdf(pdf_path: str) -> pd.DataFrame:
@@ -105,7 +145,11 @@ def parse_statement_pdf(pdf_path: str) -> pd.DataFrame:
                         continue
 
                     records.append({
-                        "确认日期": _to_date(row[_IDX_CONFIRM_DATE]),
+                        "确认日期": _infer_confirm_date(
+                            row, biz_type,
+                            _to_float(row[_IDX_APPLY_AMOUNT]),
+                            _to_float(row[_IDX_APPLY_SHARES]),
+                        ),
                         "基金代码": fund_code,
                         "基金名称": _clean_text(row[_IDX_FUND_NAME]),
                         "业务类型": biz_type,

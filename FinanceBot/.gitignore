@@ -1,12 +1,25 @@
 # ===== 敏感数据：禁止上传（含个人财务与身份信息）=====
 # 蚂蚁财富交割单 PDF（含姓名、身份证号、全部交易记录）
 data/raw/alipay/*.pdf
+# 未打码的持仓截图（含个人资产信息）
+data/raw/alipay/*.jpg
+data/raw/alipay/*.jpeg
+data/raw/alipay/*.png
+data/raw/alipay/*.bmp
+# 打码模板也只保留在本地，避免任何 JPG 被上传
+docs/templates/*.jpg
+
 # 生成的持仓/流水 CSV（个人资产数据）
 data/processed/alipay/*.csv
+data/export/*.csv
+
+# 基金净值缓存（非核心代码，但包含查询痕迹）
+data/processed/market_data/*.json
 
 # ===== 保留目录结构占位（克隆后目录仍然存在）=====
 !data/raw/alipay/.gitkeep
 !data/processed/alipay/.gitkeep
+!data/export/.gitkeep
 
 # ===== 运行日志 =====
 logs/*.log
