@@ -19,6 +19,7 @@ import json
 import re
 import subprocess
 import sys
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -28,22 +29,43 @@ sys.path.insert(0, str(PROJECT_ROOT))
 DEFAULT_IMAGE_DIR = PROJECT_ROOT / "data" / "raw" / "alipay"
 DEFAULT_OCR_SCRIPT = PROJECT_ROOT / "scripts" / "ocr_snapshot.ps1"
 DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "processed" / "alipay" / "snapshot_input.auto.json"
+DEFAULT_COMPARISON_OUTPUT = PROJECT_ROOT / "data" / "processed" / "alipay" / "snapshot_comparison.json"
 FUND_MAP_CSV = PROJECT_ROOT / "data" / "processed" / "alipay" / "fund_positions.csv"
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
+NAME_SIMILARITY_THRESHOLD = 0.88
+AMOUNT_ABS_TOLERANCE = 0.05
+AMOUNT_REL_TOLERANCE = 0.001
+
+
+def find_images(explicit: list[str] | None = None) -> list[Path]:
+    """返回本次需要处理的全部图片；默认扫描 raw/alipay 下所有支持的图片。"""
+    if explicit:
+        paths = [Path(item).resolve() for item in explicit]
+        missing = [str(path) for path in paths if not path.exists()]
+        if missing:
+            raise FileNotFoundError("找不到图片: " + ", ".join(missing))
+    else:
+        paths = [
+            path for path in DEFAULT_IMAGE_DIR.iterdir()
+            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+        ]
+        if not paths:
+            raise FileNotFoundError(f"{DEFAULT_IMAGE_DIR} 下没有图片")
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in sorted(paths, key=lambda item: (item.stat().st_mtime, item.name.lower())):
+        if path not in seen:
+            unique.append(path)
+            seen.add(path)
+    return unique
 
 
 def find_image(explicit: str | None) -> Path:
+    """兼容旧调用：只返回一张图片。"""
     if explicit:
-        path = Path(explicit).resolve()
-        if not path.exists():
-            raise FileNotFoundError(path)
-        return path
-    candidates = [
-        path for path in DEFAULT_IMAGE_DIR.iterdir()
-        if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}
-    ]
-    if not candidates:
-        raise FileNotFoundError(f"{DEFAULT_IMAGE_DIR} 下没有图片")
-    return max(candidates, key=lambda path: path.stat().st_mtime)
+        return find_images([explicit])[0]
+    return find_images()[-1]
 
 
 def run_windows_ocr(image_path: Path) -> tuple[Path, dict]:
@@ -310,43 +332,304 @@ def build_input(image_path: Path, ocr: dict) -> tuple[dict, list[dict]]:
     parsed = parse_ocr(ocr, image_width)
     mapping = load_fund_names()
     rows = []
+    skipped_rows = []
     reverse_mapping = {code: name for name, code in mapping.items()}
+    captured_at = datetime.fromtimestamp(image_path.stat().st_mtime).astimezone()
     for item in parsed:
-        code = match_code(item["name"], mapping)
+        try:
+            code = match_code(item["name"], mapping)
+        except ValueError as exc:
+            skipped_rows.append({
+                "name": item["name"],
+                "market_value": item["market_value"],
+                "profit": item["profit"],
+                "profit_pct": item["profit_pct"],
+                "captured_at": captured_at.isoformat(timespec="seconds"),
+                "source_image": str(image_path),
+                "reason": str(exc),
+            })
+            continue
         rows.append({
             "code": code,
             "name": reverse_mapping.get(code, item["name"]),
             "market_value": item["market_value"],
             "profit": item["profit"],
             "profit_pct": item["profit_pct"],
+            "ocr_rate": item.get("ocr_rate"),
+            "captured_at": captured_at.isoformat(timespec="seconds"),
+            "source_image": str(image_path),
         })
-    captured_at = datetime.fromtimestamp(image_path.stat().st_mtime).astimezone()
     return {
         "captured_at": captured_at.isoformat(timespec="seconds"),
         "account": "蚂蚁财富——测试B",
         "source_image": str(image_path),
+        "source_images": [str(image_path)],
         "rows": rows,
+        "skipped_rows": skipped_rows,
     }, parsed
 
 
+def _normalize_name(name: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(name)).casefold()
+    return "".join(char for char in normalized if char.isalnum())
+
+
+def _name_similarity(left: str, right: str) -> float:
+    left_normalized = _normalize_name(left)
+    right_normalized = _normalize_name(right)
+    if not left_normalized or not right_normalized:
+        return 0.0
+    if left_normalized == right_normalized:
+        return 1.0
+    return difflib.SequenceMatcher(None, left_normalized, right_normalized).ratio()
+
+
+def _amount_comparison(left: float, right: float) -> tuple[float, bool]:
+    delta = abs(float(left) - float(right))
+    tolerance = max(AMOUNT_ABS_TOLERANCE, max(abs(float(left)), abs(float(right))) * AMOUNT_REL_TOLERANCE)
+    return round(delta, 4), delta <= tolerance
+
+
+def _same_capture_day(left: dict, right: dict) -> bool:
+    left_at = left.get("captured_at")
+    right_at = right.get("captured_at")
+    if not left_at or not right_at:
+        return True
+    return str(left_at)[:10] == str(right_at)[:10]
+
+
+def _is_duplicate_candidate(left: dict, right: dict) -> bool:
+    if left.get("account") != right.get("account") or not _same_capture_day(left, right):
+        return False
+    left_code = str(left.get("code") or "").strip()
+    right_code = str(right.get("code") or "").strip()
+    code_match = bool(left_code) and left_code == right_code
+    high_name_similarity = (
+        _name_similarity(left.get("name", ""), right.get("name", ""))
+        >= NAME_SIMILARITY_THRESHOLD
+    )
+    return code_match or high_name_similarity
+
+
+def compare_snapshot_rows(left: dict, right: dict) -> dict:
+    name_similarity = round(_name_similarity(left.get("name", ""), right.get("name", "")), 4)
+    left_code = str(left.get("code") or "").strip()
+    right_code = str(right.get("code") or "").strip()
+    if left_code and right_code:
+        code_relation = "match" if left_code == right_code else "conflict"
+    elif left_code or right_code:
+        code_relation = "one_missing"
+    else:
+        code_relation = "both_missing"
+    code_match = code_relation == "match"
+    amount_delta, amount_match = _amount_comparison(
+        float(left["market_value"]), float(right["market_value"])
+    )
+
+    if code_relation == "conflict":
+        status = "kept_both_code_mismatch"
+    elif code_match and name_similarity >= NAME_SIMILARITY_THRESHOLD and amount_match:
+        status = "duplicate_removed"
+    elif code_match and amount_match:
+        status = "duplicate_removed_name_mismatch"
+    elif code_match:
+        status = "amount_conflict_removed"
+    elif name_similarity >= NAME_SIMILARITY_THRESHOLD and amount_match:
+        status = "duplicate_removed_missing_code"
+    elif name_similarity >= NAME_SIMILARITY_THRESHOLD:
+        status = "amount_conflict_removed_missing_code"
+    else:
+        status = "kept_both"
+
+    return {
+        "name_similarity": name_similarity,
+        "code_match": code_match,
+        "code_relation": code_relation,
+        "amount_delta": amount_delta,
+        "amount_match": amount_match,
+        "status": status,
+    }
+
+
+def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
+    account = snapshots[0].get("account", "蚂蚁财富——测试B")
+    source_images = [str(path) for snapshot in snapshots for path in snapshot.get("source_images", [])]
+    skipped_rows = [
+        dict(item)
+        for snapshot in snapshots
+        for item in snapshot.get("skipped_rows", [])
+    ]
+    flattened = []
+    for snapshot in snapshots:
+        for row in snapshot.get("rows", []):
+            item = dict(row)
+            item.setdefault("account", snapshot.get("account", account))
+            item.setdefault("captured_at", snapshot.get("captured_at"))
+            item.setdefault("source_image", snapshot.get("source_image"))
+            flattened.append(item)
+
+    kept: list[dict] = []
+    comparisons: list[dict] = []
+    similar_but_kept: list[dict] = []
+    for row in flattened:
+        duplicate_index = None
+        comparison = None
+        evaluated = []
+        for index, existing in enumerate(kept):
+            if not _is_duplicate_candidate(existing, row):
+                continue
+            comparison = compare_snapshot_rows(existing, row)
+            evaluated.append((existing, comparison))
+            if comparison["status"].startswith(("duplicate_removed", "amount_conflict_removed")):
+                duplicate_index = index
+                break
+        if duplicate_index is None:
+            kept.append(row)
+            for existing, detail in evaluated:
+                if detail["status"] != "duplicate_removed":
+                    similar_but_kept.append({
+                        "left": {
+                            "code": existing.get("code"),
+                            "name": existing.get("name"),
+                            "market_value": existing.get("market_value"),
+                            "source_image": existing.get("source_image"),
+                        },
+                        "right": {
+                            "code": row.get("code"),
+                            "name": row.get("name"),
+                            "market_value": row.get("market_value"),
+                            "source_image": row.get("source_image"),
+                        },
+                        "comparison": detail,
+                    })
+            continue
+
+        existing = kept[duplicate_index]
+        for field in ("code", "name", "market_value", "profit", "profit_pct"):
+            if existing.get(field) in (None, "") and row.get(field) not in (None, ""):
+                existing[field] = row[field]
+        comparisons.append({
+            "kept": {
+                "code": existing.get("code"),
+                "name": existing.get("name"),
+                "market_value": existing.get("market_value"),
+                "source_image": existing.get("source_image"),
+            },
+            "removed": {
+                "code": row.get("code"),
+                "name": row.get("name"),
+                "market_value": row.get("market_value"),
+                "source_image": row.get("source_image"),
+            },
+            "comparison": comparison,
+        })
+
+    kept.sort(key=lambda item: (str(item.get("code") or ""), str(item.get("name") or "")))
+    captured_values = [item.get("captured_at") for item in kept if item.get("captured_at")]
+    captured_at = max(captured_values) if captured_values else datetime.now().astimezone().isoformat(timespec="seconds")
+    output_rows = [
+        {
+            "code": item.get("code"),
+            "name": item.get("name"),
+            "market_value": item.get("market_value"),
+            "profit": item.get("profit"),
+            "profit_pct": item.get("profit_pct"),
+        }
+        for item in kept
+    ]
+    payload = {
+        "captured_at": captured_at,
+        "account": account,
+        "source_image": source_images[0] if source_images else "",
+        "source_images": source_images,
+        "rows": output_rows,
+        "skipped_rows": skipped_rows,
+    }
+    comparison_report = {
+        "rules": {
+            "name_similarity_threshold": NAME_SIMILARITY_THRESHOLD,
+            "amount_absolute_tolerance": AMOUNT_ABS_TOLERANCE,
+            "amount_relative_tolerance": AMOUNT_REL_TOLERANCE,
+            "different_non_empty_codes_are_kept_separately": True,
+        },
+        "input_row_count": len(flattened),
+        "output_row_count": len(output_rows),
+        "duplicates_removed": len(flattened) - len(output_rows),
+        "removed_duplicates": comparisons,
+        "similar_but_kept": similar_but_kept,
+        "skipped_unsupported_rows": skipped_rows,
+    }
+    payload["comparison"] = {
+        "input_row_count": comparison_report["input_row_count"],
+        "output_row_count": comparison_report["output_row_count"],
+        "duplicates_removed": comparison_report["duplicates_removed"],
+    }
+    return payload, comparison_report
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="把持仓截图 OCR 成结构化输入 JSON")
-    parser.add_argument("--image", help="截图路径；默认自动选择 raw/alipay 下最新图片")
+    parser = argparse.ArgumentParser(description="把一张或多张持仓截图 OCR、对比去重并生成结构化输入 JSON")
+    parser.add_argument("images", nargs="*", help="截图路径；可一次传入多张")
+    parser.add_argument("--image", dest="option_images", nargs="+", action="append", default=[], help="截图路径；可重复使用")
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
+    parser.add_argument("--comparison-output", default=str(DEFAULT_COMPARISON_OUTPUT))
     args = parser.parse_args()
 
-    image_path = find_image(args.image)
-    ocr_path, ocr = run_windows_ocr(image_path)
-    payload, parsed = build_input(image_path, ocr)
+    explicit = list(args.images)
+    for group in args.option_images:
+        explicit.extend(group)
+    image_paths = find_images(explicit or None)
 
+    snapshots = []
+    parsed_by_image = []
+    for image_path in image_paths:
+        ocr_path, ocr = run_windows_ocr(image_path)
+        payload, parsed = build_input(image_path, ocr)
+        snapshots.append(payload)
+        parsed_by_image.append((image_path, ocr_path, parsed))
+
+    merged, comparison_report = merge_snapshot_inputs(snapshots)
     output = Path(args.output)
+    comparison_output = Path(args.comparison_output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"截图: {image_path}")
-    print(f"OCR文件: {ocr_path}")
+    comparison_output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(merged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    comparison_output.write_text(json.dumps(comparison_report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    print(f"处理截图: {len(image_paths)} 张")
+    for image_path, ocr_path, parsed in parsed_by_image:
+        print(f"截图: {image_path}")
+        print(f"OCR文件: {ocr_path}")
+        for item in parsed:
+            print(item)
     print(f"结构化输入: {output}")
-    for item in parsed:
-        print(item)
+    if comparison_report.get("skipped_unsupported_rows"):
+        print(f"跳过不支持的资产: {len(comparison_report['skipped_unsupported_rows'])} 项")
+        for item in comparison_report["skipped_unsupported_rows"]:
+            print(f"跳过: {item['name']} | {item['reason']}")
+    print(f"数据对比报告: {comparison_output}")
+    print(
+        f"对比结果: 输入 {comparison_report['input_row_count']} 项，"
+        f"保留 {comparison_report['output_row_count']} 项，"
+        f"移除重复 {comparison_report['duplicates_removed']} 项"
+    )
+    for item in comparison_report["removed_duplicates"]:
+        detail = item["comparison"]
+        print(
+            f"去重: 保留={item['kept']['code']} {item['kept']['name']}，"
+            f"移除={item['removed']['code']} {item['removed']['name']}，"
+            f"名称相似度={detail['name_similarity']}，"
+            f"金额差={detail['amount_delta']}，状态={detail['status']}"
+        )
+    for item in comparison_report["similar_but_kept"]:
+        detail = item["comparison"]
+        print(
+            f"相似但保留: {item['left']['code']} {item['left']['name']} / "
+            f"{item['right']['code']} {item['right']['name']}，"
+            f"名称相似度={detail['name_similarity']}，"
+            f"代码一致={detail['code_match']}，"
+            f"金额差={detail['amount_delta']}，状态={detail['status']}"
+        )
 
 
 if __name__ == "__main__":

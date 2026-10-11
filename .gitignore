@@ -19,3 +19,5 @@ Thumbs.db
 pytest-cache-files-*/
 *_ocr.txt
 snapshot_input.auto.json
+
+snapshot_comparison.json

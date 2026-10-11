@@ -12,7 +12,7 @@ if "%~1"=="" (
 
 ) else (
 
-  "%LocalAppData%\Programs\Python\Python312\python.exe" "%PROJECT_ROOT%\FinanceBot\scripts\ocr_to_snapshot.py" --image "%~1"
+  "%LocalAppData%\Programs\Python\Python312\python.exe" "%PROJECT_ROOT%\FinanceBot\scripts\ocr_to_snapshot.py" %*
 
 )
 
