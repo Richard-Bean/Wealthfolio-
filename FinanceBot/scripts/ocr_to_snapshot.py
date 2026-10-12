@@ -13,10 +13,8 @@ ocr_to_snapshot.py —— 持仓截图 OCR -> snapshot_input.json
 from __future__ import annotations
 
 import argparse
-import csv
 import difflib
 import json
-import re
 import subprocess
 import sys
 import unicodedata
@@ -26,11 +24,19 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.market_data.fund_lookup import (  # noqa: E402
+    load_mapping,
+    resolve_fund_name,
+    save_mapping_entry,
+    search_fund_by_name,
+)
+
 DEFAULT_IMAGE_DIR = PROJECT_ROOT / "data" / "raw" / "alipay"
 DEFAULT_OCR_SCRIPT = PROJECT_ROOT / "scripts" / "ocr_snapshot.ps1"
 DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "processed" / "alipay" / "snapshot_input.auto.json"
 DEFAULT_COMPARISON_OUTPUT = PROJECT_ROOT / "data" / "processed" / "alipay" / "snapshot_comparison.json"
 FUND_MAP_CSV = PROJECT_ROOT / "data" / "processed" / "alipay" / "fund_positions.csv"
+FUND_MAPPING_CSV = PROJECT_ROOT / "data" / "processed" / "alipay" / "fund_mapping.csv"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 NAME_SIMILARITY_THRESHOLD = 0.88
 AMOUNT_ABS_TOLERANCE = 0.05
@@ -83,15 +89,7 @@ def run_windows_ocr(image_path: Path) -> tuple[Path, dict]:
 
 
 def load_fund_names() -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    if FUND_MAP_CSV.exists():
-        with FUND_MAP_CSV.open("r", encoding="utf-8-sig", newline="") as file:
-            for row in csv.DictReader(file):
-                code = (row.get("基金代码") or row.get("symbol") or "").strip()
-                name = (row.get("基金名称") or row.get("name") or "").strip()
-                if code and name:
-                    mapping[name] = code
-    return mapping
+    return load_mapping(FUND_MAPPING_CSV, FUND_MAP_CSV)
 
 
 def _word_sort_key(word: dict) -> tuple[float, float]:
@@ -196,16 +194,10 @@ def _visible_name(words: list[dict], image_width: float) -> str:
 
 
 def match_code(name: str, mapping: dict[str, str]) -> str:
-    if name in mapping:
-        return mapping[name]
-    cleaned = re.sub(r"基金|进阶理财|定投|金选|指数基金|灵活取用|CNY|占比|收益", "", name)
-    for candidate, code in mapping.items():
-        if candidate in name or candidate in cleaned or cleaned.startswith(candidate):
-            return code
-    best = difflib.get_close_matches(cleaned, mapping.keys(), n=1, cutoff=0.35)
-    if not best:
-        raise ValueError(f"无法把名称映射为基金代码: {name}")
-    return mapping[best[0]]
+    result = resolve_fund_name(name, mapping)
+    if result.status != "resolved":
+        raise ValueError(result.reason or f"无法高可信匹配基金代码: {name}")
+    return result.code
 
 
 def _repair_amount(candidate: float, profit: float, rate_pct: float) -> float:
@@ -333,12 +325,10 @@ def build_input(image_path: Path, ocr: dict) -> tuple[dict, list[dict]]:
     mapping = load_fund_names()
     rows = []
     skipped_rows = []
-    reverse_mapping = {code: name for name, code in mapping.items()}
+    pending_rows = []
     captured_at = datetime.fromtimestamp(image_path.stat().st_mtime).astimezone()
     for item in parsed:
-        try:
-            code = match_code(item["name"], mapping)
-        except ValueError as exc:
+        if item["name"] in {"名称/金额日收益", "名称/金额", "余额"}:
             skipped_rows.append({
                 "name": item["name"],
                 "market_value": item["market_value"],
@@ -346,16 +336,48 @@ def build_input(image_path: Path, ocr: dict) -> tuple[dict, list[dict]]:
                 "profit_pct": item["profit_pct"],
                 "captured_at": captured_at.isoformat(timespec="seconds"),
                 "source_image": str(image_path),
-                "reason": str(exc),
+                "reason": "页面表头或非基金资产",
             })
             continue
+        try:
+            result = resolve_fund_name(item["name"], mapping, lookup=search_fund_by_name)
+        except Exception as exc:
+            result = None
+            lookup_error = f"{type(exc).__name__}: {exc}"
+        else:
+            lookup_error = ""
+
+        if not result or result.status != "resolved":
+            pending_rows.append({
+                **item,
+                "captured_at": captured_at.isoformat(timespec="seconds"),
+                "source_image": str(image_path),
+                "mapping_status": "pending",
+                "reason": lookup_error or (result.reason if result else "基金名称解析失败"),
+                "candidates": result.candidates if result else [],
+            })
+            continue
+
+        if result.source == "eastmoney_fund_search":
+            save_mapping_entry(
+                FUND_MAPPING_CSV,
+                code=result.code,
+                standard_name=result.matched_name,
+                ocr_alias=item["name"],
+                method="online_api",
+                source=result.source,
+            )
+            mapping[item["name"]] = result.code
         rows.append({
-            "code": code,
-            "name": reverse_mapping.get(code, item["name"]),
+            "code": result.code,
+            "name": result.matched_name or item["name"],
+            "ocr_name": item["name"],
             "market_value": item["market_value"],
             "profit": item["profit"],
             "profit_pct": item["profit_pct"],
             "ocr_rate": item.get("ocr_rate"),
+            "mapping_source": result.source,
+            "mapping_score": result.score,
             "captured_at": captured_at.isoformat(timespec="seconds"),
             "source_image": str(image_path),
         })
@@ -366,6 +388,7 @@ def build_input(image_path: Path, ocr: dict) -> tuple[dict, list[dict]]:
         "source_images": [str(image_path)],
         "rows": rows,
         "skipped_rows": skipped_rows,
+        "pending_mapping_rows": pending_rows,
     }, parsed
 
 
@@ -433,7 +456,7 @@ def compare_snapshot_rows(left: dict, right: dict) -> dict:
     elif code_match and amount_match:
         status = "duplicate_removed_name_mismatch"
     elif code_match:
-        status = "amount_conflict_removed"
+        status = "kept_both_amount_conflict"
     elif name_similarity >= NAME_SIMILARITY_THRESHOLD and amount_match:
         status = "duplicate_removed_missing_code"
     elif name_similarity >= NAME_SIMILARITY_THRESHOLD:
@@ -459,6 +482,11 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
         for snapshot in snapshots
         for item in snapshot.get("skipped_rows", [])
     ]
+    pending_mapping_rows = [
+        dict(item)
+        for snapshot in snapshots
+        for item in snapshot.get("pending_mapping_rows", [])
+    ]
     flattened = []
     for snapshot in snapshots:
         for row in snapshot.get("rows", []):
@@ -480,7 +508,7 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
                 continue
             comparison = compare_snapshot_rows(existing, row)
             evaluated.append((existing, comparison))
-            if comparison["status"].startswith(("duplicate_removed", "amount_conflict_removed")):
+            if comparison["status"].startswith("duplicate_removed"):
                 duplicate_index = index
                 break
         if duplicate_index is None:
@@ -531,9 +559,15 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
         {
             "code": item.get("code"),
             "name": item.get("name"),
+            "ocr_name": item.get("ocr_name") or item.get("name"),
             "market_value": item.get("market_value"),
             "profit": item.get("profit"),
             "profit_pct": item.get("profit_pct"),
+            "ocr_rate": item.get("ocr_rate"),
+            "mapping_source": item.get("mapping_source"),
+            "mapping_score": item.get("mapping_score"),
+            "captured_at": item.get("captured_at"),
+            "source_image": item.get("source_image"),
         }
         for item in kept
     ]
@@ -544,6 +578,7 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
         "source_images": source_images,
         "rows": output_rows,
         "skipped_rows": skipped_rows,
+        "pending_mapping_rows": pending_mapping_rows,
     }
     comparison_report = {
         "rules": {
@@ -558,6 +593,8 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
         "removed_duplicates": comparisons,
         "similar_but_kept": similar_but_kept,
         "skipped_unsupported_rows": skipped_rows,
+        "pending_mapping_rows": pending_mapping_rows,
+        "pending_mapping_count": len(pending_mapping_rows),
     }
     payload["comparison"] = {
         "input_row_count": comparison_report["input_row_count"],
@@ -607,6 +644,10 @@ def main() -> None:
         print(f"跳过不支持的资产: {len(comparison_report['skipped_unsupported_rows'])} 项")
         for item in comparison_report["skipped_unsupported_rows"]:
             print(f"跳过: {item['name']} | {item['reason']}")
+    if comparison_report.get("pending_mapping_rows"):
+        print(f"待确认基金映射: {len(comparison_report['pending_mapping_rows'])} 项")
+        for item in comparison_report["pending_mapping_rows"]:
+            print(f"待确认: {item['name']} | {item['reason']}")
     print(f"数据对比报告: {comparison_output}")
     print(
         f"对比结果: 输入 {comparison_report['input_row_count']} 项，"

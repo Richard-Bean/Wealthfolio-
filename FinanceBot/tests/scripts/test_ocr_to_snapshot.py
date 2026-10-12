@@ -90,15 +90,16 @@ def test_similar_names_with_different_codes_are_kept():
     assert report["similar_but_kept"][0]["comparison"]["status"] == "kept_both_code_mismatch"
 
 
-def test_same_code_with_amount_conflict_keeps_only_one_and_reports_conflict():
+def test_same_code_with_amount_conflict_keeps_both_and_reports_conflict():
     first = snapshot_row("017125", "华宝港股互联网ETF联接A", 1079.29, "01.jpg")
     second = snapshot_row("017125", "华宝港股互联网ETF联接A", 1200.00, "02.jpg")
 
     merged, report = merge_snapshot_inputs([snapshot(first), snapshot(second)])
 
-    assert len(merged["rows"]) == 1
-    assert report["removed_duplicates"][0]["comparison"]["amount_match"] is False
-    assert report["removed_duplicates"][0]["comparison"]["status"] == "amount_conflict_removed"
+    assert len(merged["rows"]) == 2
+    assert report["duplicates_removed"] == 0
+    assert report["similar_but_kept"][0]["comparison"]["amount_match"] is False
+    assert report["similar_but_kept"][0]["comparison"]["status"] == "kept_both_amount_conflict"
 
 
 def test_full_comparison_covers_name_code_and_amount():

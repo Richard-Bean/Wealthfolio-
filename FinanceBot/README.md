@@ -68,11 +68,33 @@ python -m pytest tests/ -v
 | tests/test_pipeline.py | tests/connectors/alipay/test_pipeline.py |
 | 运行.bat | connectors/alipay/运行.bat |
 
+## 截图基金名称映射
+
+- 独立映射表：`data/processed/alipay/fund_mapping.csv`；
+- `fund_positions.csv` 只作为旧数据来源之一，不再承担完整基金字典职责；
+- 本地匹配相似度阈值为 `0.88`，并要求基金公司、A/C 份额类别和人民币/美元币种一致；
+- 本地没有高可信匹配时，保留 OCR 原始名称并调用公开基金搜索 API；
+- API 候选过于接近、相似度过低或网络失败时进入 `pending_mapping_rows`，不猜测代码；
+- 自动确认的 API 结果写入 `fund_mapping.csv`，后续运行可离线复用。
+
 ## 演进路线
 
-- 新增银行/券商连接器：在 `connectors/` 下平行新增目录，复用 `core/normalizer/` 的持仓计算与对账、`connectors/wealthfolio/` 的导出。
-- 接入手动登录下载交割单：在 `browser/` 增加 RPA 流程，产出直接写入 `data/raw/<来源>/`。
-- 任务编排自动化：实现 `agent/`，由 planner/executor 读取 `config/config.yaml` 调度各连接器。
+### API 可行性结论
+
+**支付宝、银行和券商的个人账户 API 对本项目不可行。** 普通个人项目无法获得可合法、稳定、
+长期读取个人余额、持仓和完整历史流水的通用 API。现有接口主要面向商户、企业、收单、清算或
+持牌合作方，且个人账户认证依赖密码、短信、设备和安全控件，不能改造成普通第三方数据 API。
+券商的交易或量化接口也不保证提供完整历史账单。
+
+因此，所有来源连接器都必须支持文件导入，不能依赖官方 API 才能工作。
+
+### 实施顺序
+
+- **优先修复快照和交易语义**：区分 `Transaction`、`PositionSnapshot`、`BalanceSnapshot`，建立稳定来源 ID，避免不同日期的持仓快照被当作重复交易。
+- **券商连接器采用文件优先**：支持用户下载的 CSV、Excel、交割单和对账单 PDF，截图 OCR 只作补充。
+- **银行和支付连接器采用文件优先**：支持银行流水、账单 PDF 和支付平台导出账单，通过账户映射避免银行流水与支付流水重复计算。
+- **浏览器自动化属于可选辅助**：只在用户监督下辅助下载文件，不保存登录密码，不绕过验证码或风控。
+- **任务编排自动化**：完成数据闭环后再实现 `agent/`，由 planner/executor 读取 `config/config.yaml` 调度各连接器。
 
 ## 隐私
 
