@@ -24,11 +24,19 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from connectors.alipay.config import ACCOUNT_NAME  # noqa: E402
 from core.market_data.fund_lookup import (  # noqa: E402
     load_mapping,
     resolve_fund_name,
     save_mapping_entry,
     search_fund_by_name,
+)
+from core.normalizer.snapshot_validation import (  # noqa: E402
+    RATE_ABS_TOLERANCE,
+    RATE_REL_TOLERANCE,
+    profit_rate_pct,
+    select_profit_candidate,
+    validate_snapshot_values,
 )
 
 DEFAULT_IMAGE_DIR = PROJECT_ROOT / "data" / "raw" / "alipay"
@@ -37,7 +45,18 @@ DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "processed" / "alipay" / "snapshot_inpu
 DEFAULT_COMPARISON_OUTPUT = PROJECT_ROOT / "data" / "processed" / "alipay" / "snapshot_comparison.json"
 FUND_MAP_CSV = PROJECT_ROOT / "data" / "processed" / "alipay" / "fund_positions.csv"
 FUND_MAPPING_CSV = PROJECT_ROOT / "data" / "processed" / "alipay" / "fund_mapping.csv"
+DEFAULT_ACCOUNT = ACCOUNT_NAME
+LEGACY_ACCOUNT_NAMES = {'蚂蚁财富——测试B'}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
+
+
+def normalize_account_name(value: str | None) -> str:
+    """统一旧测试账户名，并保留用户明确指定的其他账户名。"""
+    account = str(value or "").strip()
+    if not account or account in LEGACY_ACCOUNT_NAMES:
+        return DEFAULT_ACCOUNT
+    return account
+
 NAME_SIMILARITY_THRESHOLD = 0.88
 AMOUNT_ABS_TOLERANCE = 0.05
 AMOUNT_REL_TOLERANCE = 0.001
@@ -290,6 +309,20 @@ def parse_ocr(ocr: dict, image_width: float) -> list[dict]:
             if rate_candidates else None
         )
 
+        # “全部持有”布局最右侧是累计收益。它与持有收益通常相同，
+        # 可作为 OCR 漏位/错位时的独立交叉验证来源。
+        cumulative_candidates = (
+            [
+                item for item in block_lines
+                if image_width * 0.78 <= item["x"] <= image_width * 1.01
+            ]
+            if has_middle_signed_column else []
+        )
+        cumulative_line = (
+            min(cumulative_candidates, key=lambda item: abs(item["y"] - profit_line["y"]))
+            if cumulative_candidates else None
+        )
+
         row_words = [
             word for word in ocr.get("words") or []
             if float(word.get("x", 0)) < image_width * 0.50
@@ -299,16 +332,50 @@ def parse_ocr(ocr: dict, image_width: float) -> list[dict]:
         if not name:
             continue
 
-        profit = profit_line["value"]
+        profit_ocr = profit_line["value"]
+        cumulative_profit_ocr = cumulative_line["value"] if cumulative_line else None
         rate_ocr = rate_line["value"] if rate_line else None
-        amount = _repair_amount(amount_line["value"], profit, rate_ocr or 0.0)
-        rate = profit / (amount - profit) * 100.0 if abs(amount - profit) > 1e-9 else (rate_ocr or 0.0)
+        amount = _repair_amount(amount_line["value"], profit_ocr, rate_ocr or 0.0)
+        profit, repair_detail = select_profit_candidate(
+            amount, profit_ocr, cumulative_profit_ocr, rate_ocr
+        )
+        calculated_rate = profit_rate_pct(amount, profit)
+        rate = calculated_rate if calculated_rate is not None else (rate_ocr or 0.0)
+        validation_issues, validation_detail = validate_snapshot_values(
+            amount, profit, rate, rate_ocr
+        )
+        rate_only = bool(validation_issues) and all(
+            issue["code"] in {"reported_rate_mismatch", "ocr_rate_mismatch"}
+            for issue in validation_issues
+        )
+        profit_corroborated = (
+            cumulative_profit_ocr is not None
+            and abs(profit_ocr - cumulative_profit_ocr) <= 0.01
+        )
+        validation_status = (
+            "warning"
+            if rate_only and profit_corroborated
+            else validation_detail["status"]
+        )
+        validation_detail["status"] = validation_status
+        validation_detail["warnings"] = (
+            validation_issues if validation_status == "warning" else []
+        )
         rows.append({
             "name": name,
             "market_value": round(amount, 2),
             "profit": round(profit, 2),
             "profit_pct": round(rate, 2),
+            "ocr_profit": round(profit_ocr, 2),
+            "cumulative_profit_ocr": (
+                round(cumulative_profit_ocr, 2) if cumulative_profit_ocr is not None else None
+            ),
             "ocr_rate": round(rate_ocr, 2) if rate_ocr is not None else None,
+            "profit_repair": repair_detail,
+            "validation_status": validation_detail["status"],
+            "validation": validation_detail,
+            "validation_errors": [] if validation_status == "warning" else validation_issues,
+            "validation_warnings": validation_issues if validation_status == "warning" else [],
         })
 
     if not rows:
@@ -334,6 +401,10 @@ def build_input(image_path: Path, ocr: dict) -> tuple[dict, list[dict]]:
                 "market_value": item["market_value"],
                 "profit": item["profit"],
                 "profit_pct": item["profit_pct"],
+                "ocr_rate": item.get("ocr_rate"),
+                "validation_status": item.get("validation_status"),
+                "validation": item.get("validation"),
+                "validation_errors": item.get("validation_errors"),
                 "captured_at": captured_at.isoformat(timespec="seconds"),
                 "source_image": str(image_path),
                 "reason": "页面表头或非基金资产",
@@ -375,7 +446,14 @@ def build_input(image_path: Path, ocr: dict) -> tuple[dict, list[dict]]:
             "market_value": item["market_value"],
             "profit": item["profit"],
             "profit_pct": item["profit_pct"],
+            "ocr_profit": item.get("ocr_profit"),
+            "cumulative_profit_ocr": item.get("cumulative_profit_ocr"),
             "ocr_rate": item.get("ocr_rate"),
+            "profit_repair": item.get("profit_repair"),
+            "validation_status": item.get("validation_status"),
+            "validation": item.get("validation"),
+            "validation_errors": item.get("validation_errors"),
+            "validation_warnings": item.get("validation_warnings"),
             "mapping_source": result.source,
             "mapping_score": result.score,
             "captured_at": captured_at.isoformat(timespec="seconds"),
@@ -383,7 +461,7 @@ def build_input(image_path: Path, ocr: dict) -> tuple[dict, list[dict]]:
         })
     return {
         "captured_at": captured_at.isoformat(timespec="seconds"),
-        "account": "蚂蚁财富——测试B",
+        "account": normalize_account_name(DEFAULT_ACCOUNT),
         "source_image": str(image_path),
         "source_images": [str(image_path)],
         "rows": rows,
@@ -475,7 +553,7 @@ def compare_snapshot_rows(left: dict, right: dict) -> dict:
 
 
 def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
-    account = snapshots[0].get("account", "蚂蚁财富——测试B")
+    account = normalize_account_name(snapshots[0].get("account", DEFAULT_ACCOUNT))
     source_images = [str(path) for snapshot in snapshots for path in snapshot.get("source_images", [])]
     skipped_rows = [
         dict(item)
@@ -563,7 +641,14 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
             "market_value": item.get("market_value"),
             "profit": item.get("profit"),
             "profit_pct": item.get("profit_pct"),
+            "ocr_profit": item.get("ocr_profit"),
+            "cumulative_profit_ocr": item.get("cumulative_profit_ocr"),
             "ocr_rate": item.get("ocr_rate"),
+            "profit_repair": item.get("profit_repair"),
+            "validation_status": item.get("validation_status"),
+            "validation": item.get("validation"),
+            "validation_errors": item.get("validation_errors"),
+            "validation_warnings": item.get("validation_warnings"),
             "mapping_source": item.get("mapping_source"),
             "mapping_score": item.get("mapping_score"),
             "captured_at": item.get("captured_at"),
@@ -585,6 +670,8 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
             "name_similarity_threshold": NAME_SIMILARITY_THRESHOLD,
             "amount_absolute_tolerance": AMOUNT_ABS_TOLERANCE,
             "amount_relative_tolerance": AMOUNT_REL_TOLERANCE,
+            "rate_absolute_tolerance": RATE_ABS_TOLERANCE,
+            "rate_relative_tolerance": RATE_REL_TOLERANCE,
             "different_non_empty_codes_are_kept_separately": True,
         },
         "input_row_count": len(flattened),
@@ -595,6 +682,32 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
         "skipped_unsupported_rows": skipped_rows,
         "pending_mapping_rows": pending_mapping_rows,
         "pending_mapping_count": len(pending_mapping_rows),
+        "manual_review_rows": [
+            {
+                "code": item.get("code"),
+                "name": item.get("name"),
+                "validation_errors": item.get("validation_errors"),
+                "source_image": item.get("source_image"),
+            }
+            for item in output_rows
+            if item.get("validation_status") == "manual_review"
+        ],
+        "manual_review_count": sum(
+            item.get("validation_status") == "manual_review" for item in output_rows
+        ),
+        "validation_warning_rows": [
+            {
+                "code": item.get("code"),
+                "name": item.get("name"),
+                "validation_warnings": item.get("validation_warnings"),
+                "source_image": item.get("source_image"),
+            }
+            for item in output_rows
+            if item.get("validation_status") == "warning"
+        ],
+        "validation_warning_count": sum(
+            item.get("validation_status") == "warning" for item in output_rows
+        ),
     }
     payload["comparison"] = {
         "input_row_count": comparison_report["input_row_count"],

@@ -7,9 +7,12 @@ SCRIPTS_ROOT = Path(__file__).resolve().parents[2] / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from ocr_to_snapshot import (
+    DEFAULT_ACCOUNT,
     compare_snapshot_rows,
     find_images,
     merge_snapshot_inputs,
+    normalize_account_name,
+    parse_ocr,
     parse_signed_number,
 )
 
@@ -121,3 +124,79 @@ def test_missing_code_high_similarity_row_is_merged_and_code_is_backfilled():
     assert len(merged["rows"]) == 1
     assert merged["rows"][0]["code"] == "017125"
     assert report["removed_duplicates"][0]["comparison"]["status"] == "duplicate_removed_missing_code"
+
+
+def test_legacy_account_name_is_replaced_with_antfortune():
+    assert DEFAULT_ACCOUNT == "蚂蚁财富"
+    assert normalize_account_name("蚂蚁财富——测试B") == "蚂蚁财富"
+    assert normalize_account_name("其他账户") == "其他账户"
+
+
+def line(words):
+    return {"text": "".join(item["text"] for item in words), "words": words}
+
+
+def screenshot_ocr(include_cumulative=True):
+    name_words = [word("南方纳斯达克100指数A", 60, 900)]
+    amount_words = [
+        word("611", 70, 1000),
+        word("．", 120, 1000),
+        word("80", 140, 1000),
+    ]
+    daily_words = [
+        word("+", 400, 1000),
+        word("2.50", 420, 1000),
+    ]
+    holding_words = [
+        word("+", 654, 1000),
+        word("1", 677, 1000),
+        word("t80", 698, 1000),
+    ]
+    rate_words = [
+        word("+", 658, 1060),
+        word("2", 676, 1060),
+        word("．", 695, 1060),
+        word("03", 703, 1060),
+        word("％", 740, 1060),
+    ]
+    cumulative_words = [
+        word("+", 899, 1000),
+        word("1", 922, 1000),
+        word("1", 943, 1000),
+        word("·", 960, 1000),
+        word("80", 970, 1000),
+    ]
+
+    words = name_words + amount_words + daily_words + holding_words + rate_words
+    numeric_lines = [amount_words, daily_words, holding_words, rate_words]
+    if include_cumulative:
+        words += cumulative_words
+        numeric_lines.append(cumulative_words)
+
+    return {
+        "words": words,
+        "lines": [line(items) for items in numeric_lines],
+    }
+
+
+def test_parse_ocr_repairs_profit_from_cumulative_column():
+    rows = parse_ocr(screenshot_ocr(include_cumulative=True), image_width=1080)
+
+    assert len(rows) == 1
+    assert rows[0]["market_value"] == 611.80
+    assert rows[0]["ocr_profit"] == 1.80
+    assert rows[0]["cumulative_profit_ocr"] == 11.80
+    assert rows[0]["profit"] == 11.80
+    assert rows[0]["profit_repair"]["repaired"] is True
+    assert rows[0]["validation_status"] == "ok"
+
+
+def test_parse_ocr_flags_rate_mismatch_without_repair_source():
+    rows = parse_ocr(screenshot_ocr(include_cumulative=False), image_width=1080)
+
+    assert rows[0]["profit"] == 1.80
+    assert rows[0]["validation_status"] == "manual_review"
+    assert any(
+        issue["code"] == "ocr_rate_mismatch"
+        for issue in rows[0]["validation_errors"]
+    )

@@ -16,7 +16,7 @@ FinanceBot/
 │   └── playwright/
 ├── core/                     # 通用业务逻辑（与具体机构无关）
 │   ├── parser/               # 通用解析器（预留）
-│   ├── normalizer/           # position_calculator.py 摊薄成本持仓；validator.py 对账校验
+│   ├── normalizer/           # 持仓计算、对账校验、快照对账和 OCR 数值一致性校验
 │   └── pipeline/             # 任务编排（预留；当前编排入口在 connectors/alipay/scripts/run.py）
 ├── data/                     # 全局数据层
 │   ├── raw/                  # 原始数据：data/raw/alipay/ 放交割单 PDF（用户投放区）
@@ -76,6 +76,16 @@ python -m pytest tests/ -v
 - 本地没有高可信匹配时，保留 OCR 原始名称并调用公开基金搜索 API；
 - API 候选过于接近、相似度过低或网络失败时进入 `pending_mapping_rows`，不猜测代码；
 - 自动确认的 API 结果写入 `fund_mapping.csv`，后续运行可离线复用。
+
+## 截图数值校验
+
+`core/normalizer/snapshot_validation.py` 负责检查持有金额、持有收益、收益率、净值和份额之间的
+关系。OCR 解析会同时读取“持有收益”和“累计收益”，自动修复可信的漏位错误，并保留原始识别值。
+严重不一致会阻止导出；仅收益率口径不同但收益金额一致时记录警告。Wealthfolio 账户名统一为
+“蚂蚁财富”。
+
+这套校验主要用于提升 OCR 识别后数据的准确性，防止识别错误扩散到标准化、持仓计算、交易推断和
+最终导出；它不改变 OCR 引擎本身的识别能力。
 
 ## 演进路线
 
