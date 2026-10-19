@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-ocr_to_snapshot.py —— 持仓截图 OCR -> snapshot_input.json
+ocr_to_snapshot.py —— 持仓截图 OCR -> 持仓快照输入.json
 
 设计目标：双击 BAT 后自动完成：
-图片 -> Windows OCR JSON -> 持仓行解析 -> 本地净值 API -> snapshot_input.json
+图片 -> Windows OCR JSON -> 持仓行解析 -> 本地净值 API -> 持仓快照输入.json
 
 不上传截图。当前解析器面向支付宝/养基宝“我的持有”列表布局：
 左列名称、中列金额/昨日收益、右列持有收益/率。
@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import re
 import subprocess
 import sys
 import unicodedata
@@ -31,6 +32,14 @@ from core.market_data.fund_lookup import (  # noqa: E402
     save_mapping_entry,
     search_fund_by_name,
 )
+from ocr_transactions import (  # noqa: E402
+    confirmed_transaction_rows,
+    detect_transaction_screenshot,
+    merge_pending_rows,
+    parse_transaction_ocr,
+    write_confirmed_transactions,
+    write_pending_transactions,
+)
 from core.normalizer.snapshot_validation import (  # noqa: E402
     RATE_ABS_TOLERANCE,
     RATE_REL_TOLERANCE,
@@ -41,13 +50,26 @@ from core.normalizer.snapshot_validation import (  # noqa: E402
 
 DEFAULT_IMAGE_DIR = PROJECT_ROOT / "data" / "raw" / "alipay"
 DEFAULT_OCR_SCRIPT = PROJECT_ROOT / "scripts" / "ocr_snapshot.ps1"
-DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "processed" / "alipay" / "snapshot_input.auto.json"
-DEFAULT_COMPARISON_OUTPUT = PROJECT_ROOT / "data" / "processed" / "alipay" / "snapshot_comparison.json"
-FUND_MAP_CSV = PROJECT_ROOT / "data" / "processed" / "alipay" / "fund_positions.csv"
-FUND_MAPPING_CSV = PROJECT_ROOT / "data" / "processed" / "alipay" / "fund_mapping.csv"
+DEFAULT_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed" / "reconciliation" / "alipay"
+DEFAULT_OUTPUT = DEFAULT_PROCESSED_DIR / "持仓快照输入.json"
+DEFAULT_COMPARISON_OUTPUT = DEFAULT_PROCESSED_DIR / "持仓快照对比报告.json"
+DEFAULT_PENDING_OUTPUT = DEFAULT_PROCESSED_DIR / "待确认交易.csv"
+DEFAULT_CONFIRMED_OUTPUT = PROJECT_ROOT / "data" / "processed" / "reconciliation" / "后续交易_2026-10-12.csv"
+FUND_MAP_CSV = DEFAULT_PROCESSED_DIR / "基金持仓表.csv"
+FUND_MAPPING_CSV = DEFAULT_PROCESSED_DIR / "基金名称代码映射.csv"
 DEFAULT_ACCOUNT = ACCOUNT_NAME
 LEGACY_ACCOUNT_NAMES = {'蚂蚁财富——测试B'}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
+TEMPLATE_ALL_HOLDINGS = "all_holdings_4_columns"
+TEMPLATE_MY_HOLDINGS = "my_holdings_3_columns"
+TEMPLATE_NAMES = {
+    TEMPLATE_ALL_HOLDINGS: "全部持有（名称/金额、日收益、持有收益、累计收益）",
+    TEMPLATE_MY_HOLDINGS: "我的持有（名称、金额/昨日收益、持有收益/率）",
+}
+IGNORED_NAME_SUFFIX_RE = re.compile(
+    r"(?:基金|黄金)?(?:进阶理财|稳健理财|灵活取用|今日收益更新)$"
+)
+QDII_OCR_RE = re.compile(r"QD.{0,4}?(?=[A-Ca-c人民币()（）]|$)", re.S)
 
 
 def normalize_account_name(value: str | None) -> str:
@@ -94,7 +116,13 @@ def find_image(explicit: str | None) -> Path:
 
 
 def run_windows_ocr(image_path: Path) -> tuple[Path, dict]:
-    output_path = image_path.with_name(f"{image_path.stem}_ocr.txt")
+    timestamp_match = re.search(r"(20\d{6})[_-]?(\d{6})", image_path.stem)
+    if timestamp_match:
+        output_name = f"识别文本_{timestamp_match.group(1)}_{timestamp_match.group(2)}.txt"
+    else:
+        modified_at = datetime.fromtimestamp(image_path.stat().st_mtime)
+        output_name = f"识别文本_{modified_at.strftime('%Y%m%d_%H%M%S_%f')}.txt"
+    output_path = image_path.with_name(output_name)
     subprocess.run(
         [
             "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
@@ -125,6 +153,11 @@ def _is_sign(text: str) -> str | None:
         return "+"
     if value in {"-", "−", "—", "－", "一", "һ"}:
         return "-"
+    if len(value) > 1 and _digits(value):
+        if value[0] in {"+", "＋"}:
+            return "+"
+        if value[0] in {"-", "−", "—", "－", "一", "һ"}:
+            return "-"
     return None
 
 
@@ -137,6 +170,11 @@ def parse_signed_number(words: list[dict]) -> float | None:
 
     first_numeric_x = float(numeric[0].get("x", 0))
     sign = 1.0
+    embedded_sign = _is_sign(numeric[0].get("text", ""))
+    if embedded_sign == "+":
+        sign = 1.0
+    elif embedded_sign == "-":
+        sign = -1.0
     for word in words:
         if float(word.get("x", 0)) < first_numeric_x:
             marker = _is_sign(word.get("text", ""))
@@ -188,10 +226,7 @@ def _line_x_center(words: list[dict]) -> float:
 
 
 def _visible_name(words: list[dict], image_width: float) -> str:
-    left_words = [
-        word for word in words
-        if float(word.get("x", 0)) < image_width * 0.50
-    ]
+    left_words = list(words)
     left_words.sort(key=lambda word: float(word.get("y", 0)))
     ordered = []
     for word in left_words:
@@ -239,32 +274,213 @@ def _repair_amount(candidate: float, profit: float, rate_pct: float) -> float:
     return best
 
 
-def parse_ocr(ocr: dict, image_width: float) -> list[dict]:
-    lines = ocr.get("lines") or []
-    parsed_lines = []
-    for line in lines:
+def _compact_text(value: object) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return "".join(char for char in normalized if char.isalnum())
+
+
+def _numeric_line_items(ocr: dict) -> list[dict]:
+    items = []
+    for line in ocr.get("lines") or []:
         words = line.get("words") or []
         value = parse_signed_number(words)
         if value is None:
             continue
-        has_sign = any(_is_sign(word.get("text", "")) for word in words)
-        parsed_lines.append({
+        items.append({
             "words": words,
+            "text": line.get("text", ""),
             "value": value,
             "y": _line_y(words),
             "x": _line_x_center(words),
-            "has_sign": has_sign,
+            "has_sign": any(_is_sign(word.get("text", "")) for word in words),
         })
+    return items
 
-    content_lines = [
-        item for item in parsed_lines
-        if image_width * 0.25 < item["y"] < image_width * 2.0
+
+def detect_template(ocr: dict, image_width: float) -> dict:
+    """根据页面标题、列标题和数字列位置识别两种持仓截图模板。"""
+    full_text = _compact_text(
+        " ".join(line.get("text", "") for line in ocr.get("lines") or [])
+    )
+    numeric_items = _numeric_line_items(ocr)
+    all_score = 0
+    my_score = 0
+    evidence = []
+
+    marker_scores = [
+        ("全部持有", "all_holdings_4_columns", 5),
+        ("名称金额", "all_holdings_4_columns", 2),
+        ("累计收益", "all_holdings_4_columns", 3),
+        ("我的持有", "my_holdings_3_columns", 5),
+        ("金额昨日收益", "my_holdings_3_columns", 3),
+        ("持有收益率", "my_holdings_3_columns", 3),
     ]
+    for marker, template_id, score in marker_scores:
+        if marker in full_text:
+            evidence.append(f"文字标记:{marker}")
+            if template_id == TEMPLATE_ALL_HOLDINGS:
+                all_score += score
+            else:
+                my_score += score
+    if "日收益" in full_text and "金额昨日收益" not in full_text:
+        evidence.append("文字标记:日收益")
+        all_score += 3
+
+    middle_signed = any(
+        item["has_sign"] and image_width * 0.28 <= item["x"] <= image_width * 0.56
+        for item in numeric_items
+    )
+    middle_amount = any(
+        not item["has_sign"]
+        and item["value"] > 0
+        and image_width * 0.45 <= item["x"] <= image_width * 0.73
+        for item in numeric_items
+    )
+    holding_signed = any(
+        item["has_sign"] and image_width * 0.55 <= item["x"] <= image_width * 0.80
+        for item in numeric_items
+    )
+    far_right_signed = any(
+        item["has_sign"] and image_width * 0.76 <= item["x"] <= image_width * 1.01
+        for item in numeric_items
+    )
+    if middle_signed and far_right_signed:
+        all_score += 2
+        evidence.append("布局:中间日收益列+右侧累计收益列")
+    elif middle_signed and holding_signed:
+        all_score += 1
+        evidence.append("布局:中间日收益列+右侧持有收益列")
+    if middle_amount and far_right_signed and not middle_signed:
+        my_score += 2
+        evidence.append("布局:中列金额/昨日收益+右列持有收益/率")
+
+    if all_score <= 0 and my_score <= 0:
+        raise ValueError("未识别出支持的持仓截图模板")
+    if all_score == my_score:
+        raise ValueError("截图模板特征冲突，无法确定应使用哪套识别规则")
+
+    template_id = TEMPLATE_ALL_HOLDINGS if all_score > my_score else TEMPLATE_MY_HOLDINGS
+    confidence = round(max(all_score, my_score) / max(all_score + my_score, 1), 2)
+    return {
+        "id": template_id,
+        "name": TEMPLATE_NAMES[template_id],
+        "confidence": confidence,
+        "evidence": evidence,
+        "scores": {
+            TEMPLATE_ALL_HOLDINGS: all_score,
+            TEMPLATE_MY_HOLDINGS: my_score,
+        },
+    }
+
+
+def _table_header_y(ocr: dict, template_id: str) -> float | None:
+    markers_by_y: dict[float, set[str]] = {}
+    markers = (
+        ("名称金额", "日收益", "持有收益", "累计收益")
+        if template_id == TEMPLATE_ALL_HOLDINGS
+        else ("名称", "金额昨日收益", "持有收益率")
+    )
+    for line in ocr.get("lines") or []:
+        words = line.get("words") or []
+        if not words:
+            continue
+        text = _compact_text(line.get("text", ""))
+        matched = {marker for marker in markers if marker in text}
+        if not matched:
+            continue
+        y_key = round(_line_y(words) / 10) * 10
+        markers_by_y.setdefault(y_key, set()).update(matched)
+    if not markers_by_y:
+        return None
+    best_y, _ = max(
+        markers_by_y.items(),
+        key=lambda item: (len(item[1]), -item[0]),
+    )
+    return float(best_y)
+
+
+def _has_reliable_decimal(words: list[dict]) -> bool:
+    text = "".join(str(word.get("text", "")) for word in sorted(words, key=_word_sort_key))
+    return bool(re.search(r"\d\s*[．.·。]\s*\d", text))
+
+
+def _template_rules(template_id: str) -> dict:
+    if template_id == TEMPLATE_ALL_HOLDINGS:
+        return {
+            "amount_x": (0.02, 0.30),
+            "daily_x": (0.30, 0.55),
+            "holding_x": (0.56, 0.79),
+            "cumulative_x": (0.79, 1.01),
+            "name_x": 1.01,
+            "name_y": (-185.0, -12.0),
+            "rate_y_offset": 65.0,
+        }
+    return {
+        "amount_x": (0.45, 0.73),
+        "daily_x": (0.45, 0.73),
+        "holding_x": (0.76, 1.01),
+        "cumulative_x": None,
+        "name_x": 0.45,
+        "name_y": (-115.0, 115.0),
+        "rate_y_offset": 65.0,
+    }
+
+
+def _is_non_fund_asset(name: str) -> bool:
+    normalized = _compact_text(name)
+    return any(marker in normalized for marker in ("积存金", "黄金理财", "黄金活期", "存金宝"))
+
+
+def _clean_row_name(name: str) -> str:
+    cleaned = re.sub(r"占比.*$", "", str(name or ""))
+    cleaned = cleaned.replace("（", "(").replace("）", ")")
+    cleaned = QDII_OCR_RE.sub("QDII", cleaned)
+    cleaned = re.sub(
+        r"\(QDII([A-Ca-c])",
+        lambda match: f"(QDII){match.group(1).upper()}",
+        cleaned,
+    )
+    cleaned = IGNORED_NAME_SUFFIX_RE.sub("", cleaned)
+    for _ in range(3):
+        shortened = re.sub(r"(?:基金)?(?:进阶理财|稳健理财|灵活取用)?(?:定投|指数基金|数基金)$", "", cleaned)
+        if shortened == cleaned:
+            break
+        cleaned = shortened
+    if cleaned.endswith("(QDII"):
+        cleaned += ")"
+    return cleaned.strip(" |·．.")
+
+
+def parse_ocr(
+    ocr: dict,
+    image_width: float,
+    template: str | dict | None = None,
+) -> list[dict]:
+    if template is None:
+        template_info = detect_template(ocr, image_width)
+    elif isinstance(template, dict):
+        template_info = template
+    else:
+        template_info = {
+            "id": template,
+            "name": TEMPLATE_NAMES.get(template, template),
+            "confidence": 1.0,
+            "evidence": ["调用方指定模板"],
+        }
+    template_id = template_info["id"]
+    if template_id not in TEMPLATE_NAMES:
+        raise ValueError(f"不支持的截图模板: {template_id}")
+
+    rules = _template_rules(template_id)
+    parsed_lines = _numeric_line_items(ocr)
+    header_y = _table_header_y(ocr, template_id)
+    positive_y = [item["y"] for item in parsed_lines if item["y"] > 0]
+    fallback_top = min(positive_y) - 200 if positive_y else image_width * 0.25
+    content_top = max(image_width * 0.25, (header_y + 45) if header_y is not None else fallback_top)
+    content_lines = [item for item in parsed_lines if item["y"] >= content_top]
     if not content_lines:
         raise ValueError("没有识别到持仓数字")
 
-    # 每个持仓行通常有“金额/日收益/持有收益/率”两层 y 坐标。
-    # 以垂直间隔聚类，避免依赖固定像素高度。
     sorted_y = sorted({round(item["y"], 1) for item in content_lines})
     blocks: list[list[float]] = [[sorted_y[0]]]
     for value in sorted_y[1:]:
@@ -273,69 +489,83 @@ def parse_ocr(ocr: dict, image_width: float) -> list[dict]:
         else:
             blocks[-1].append(value)
 
-    # “全部持有”布局有中间的日收益列；旧布局没有。
-    has_middle_signed_column = any(
-        item["has_sign"] and image_width * 0.30 <= item["x"] <= image_width * 0.55
-        for item in content_lines
-    )
-    amount_max_x = image_width * (0.45 if has_middle_signed_column else 0.70)
-    holding_min_x = image_width * (0.50 if has_middle_signed_column else 0.70)
-    holding_max_x = image_width * (0.76 if has_middle_signed_column else 1.01)
+    def in_x(item: dict, bounds: tuple[float, float]) -> bool:
+        low, high = bounds
+        return low <= item["x"] / image_width <= high
 
     rows = []
     for block in blocks:
         y_min, y_max = min(block), max(block)
-        block_lines = [item for item in content_lines if y_min - 1 <= item["y"] <= y_max + 1]
+        block_lines = [
+            item for item in content_lines
+            if y_min - 1 <= item["y"] <= y_max + 1
+        ]
 
         amount_candidates = [
             item for item in block_lines
-            if not item["has_sign"] and item["x"] < amount_max_x and item["value"] > 0
+            if not item["has_sign"] and item["value"] > 0 and in_x(item, rules["amount_x"])
         ]
         if not amount_candidates:
             continue
         amount_line = max(amount_candidates, key=lambda item: abs(item["value"]))
 
+        daily_candidates = [
+            item for item in block_lines
+            if item["has_sign"] and in_x(item, rules["daily_x"])
+        ]
+        daily_line = (
+            min(daily_candidates, key=lambda item: abs(item["y"] - amount_line["y"]))
+            if daily_candidates else None
+        )
+
         holding_candidates = [
             item for item in block_lines
-            if holding_min_x <= item["x"] <= holding_max_x
+            if item["has_sign"] and in_x(item, rules["holding_x"])
         ]
         if not holding_candidates:
             continue
-
         profit_line = min(holding_candidates, key=lambda item: abs(item["y"] - amount_line["y"]))
         rate_candidates = [item for item in holding_candidates if item is not profit_line]
         rate_line = (
-            min(rate_candidates, key=lambda item: abs(item["y"] - (amount_line["y"] + 65)))
+            min(
+                rate_candidates,
+                key=lambda item: abs(item["y"] - (amount_line["y"] + rules["rate_y_offset"])),
+            )
             if rate_candidates else None
         )
 
-        # “全部持有”布局最右侧是累计收益。它与持有收益通常相同，
-        # 可作为 OCR 漏位/错位时的独立交叉验证来源。
+        cumulative_bounds = rules["cumulative_x"]
         cumulative_candidates = (
             [
                 item for item in block_lines
-                if image_width * 0.78 <= item["x"] <= image_width * 1.01
+                if item["has_sign"] and in_x(item, cumulative_bounds)
             ]
-            if has_middle_signed_column else []
+            if cumulative_bounds else []
         )
         cumulative_line = (
             min(cumulative_candidates, key=lambda item: abs(item["y"] - profit_line["y"]))
             if cumulative_candidates else None
         )
 
+        name_y_min = y_min + rules["name_y"][0]
+        name_y_max = amount_line["y"] + rules["name_y"][1]
         row_words = [
             word for word in ocr.get("words") or []
-            if float(word.get("x", 0)) < image_width * 0.50
-            and y_min - 140 <= float(word.get("y", 0)) <= amount_line["y"] - 10
+            if float(word.get("x", 0)) < image_width * rules["name_x"]
+            and name_y_min <= float(word.get("y", 0)) <= name_y_max
         ]
-        name = _visible_name(row_words, image_width)
+        name = _clean_row_name(_visible_name(row_words, image_width))
         if not name:
             continue
 
         profit_ocr = profit_line["value"]
         cumulative_profit_ocr = cumulative_line["value"] if cumulative_line else None
         rate_ocr = rate_line["value"] if rate_line else None
-        amount = _repair_amount(amount_line["value"], profit_ocr, rate_ocr or 0.0)
+        amount = (
+            amount_line["value"]
+            if _has_reliable_decimal(amount_line["words"])
+            else _repair_amount(amount_line["value"], profit_ocr, rate_ocr or 0.0)
+        )
         profit, repair_detail = select_profit_candidate(
             amount, profit_ocr, cumulative_profit_ocr, rate_ocr
         )
@@ -362,10 +592,12 @@ def parse_ocr(ocr: dict, image_width: float) -> list[dict]:
             validation_issues if validation_status == "warning" else []
         )
         rows.append({
+            "template": template_id,
             "name": name,
             "market_value": round(amount, 2),
             "profit": round(profit, 2),
             "profit_pct": round(rate, 2),
+            "daily_profit_ocr": round(daily_line["value"], 2) if daily_line else None,
             "ocr_profit": round(profit_ocr, 2),
             "cumulative_profit_ocr": (
                 round(cumulative_profit_ocr, 2) if cumulative_profit_ocr is not None else None
@@ -388,13 +620,26 @@ def build_input(image_path: Path, ocr: dict) -> tuple[dict, list[dict]]:
     with Image.open(image_path) as image:
         image_width = float(image.width)
 
-    parsed = parse_ocr(ocr, image_width)
+    template_info = detect_template(ocr, image_width)
+    parsed = parse_ocr(ocr, image_width, template=template_info)
     mapping = load_fund_names()
     rows = []
     skipped_rows = []
     pending_rows = []
     captured_at = datetime.fromtimestamp(image_path.stat().st_mtime).astimezone()
     for item in parsed:
+        if _is_non_fund_asset(item["name"]):
+            skipped_rows.append({
+                "template": template_info["id"],
+                "name": item["name"],
+                "market_value": item["market_value"],
+                "profit": item["profit"],
+                "profit_pct": item["profit_pct"],
+                "captured_at": captured_at.isoformat(timespec="seconds"),
+                "source_image": str(image_path),
+                "reason": "积存金/黄金等非基金资产，暂时忽略",
+            })
+            continue
         if item["name"] in {"名称/金额日收益", "名称/金额", "余额"}:
             skipped_rows.append({
                 "name": item["name"],
@@ -440,12 +685,14 @@ def build_input(image_path: Path, ocr: dict) -> tuple[dict, list[dict]]:
             )
             mapping[item["name"]] = result.code
         rows.append({
+            "template": template_info["id"],
             "code": result.code,
             "name": result.matched_name or item["name"],
             "ocr_name": item["name"],
             "market_value": item["market_value"],
             "profit": item["profit"],
             "profit_pct": item["profit_pct"],
+            "daily_profit_ocr": item.get("daily_profit_ocr"),
             "ocr_profit": item.get("ocr_profit"),
             "cumulative_profit_ocr": item.get("cumulative_profit_ocr"),
             "ocr_rate": item.get("ocr_rate"),
@@ -464,6 +711,8 @@ def build_input(image_path: Path, ocr: dict) -> tuple[dict, list[dict]]:
         "account": normalize_account_name(DEFAULT_ACCOUNT),
         "source_image": str(image_path),
         "source_images": [str(image_path)],
+        "template": template_info["id"],
+        "template_detection": template_info,
         "rows": rows,
         "skipped_rows": skipped_rows,
         "pending_mapping_rows": pending_rows,
@@ -500,7 +749,9 @@ def _same_capture_day(left: dict, right: dict) -> bool:
 
 
 def _is_duplicate_candidate(left: dict, right: dict) -> bool:
-    if left.get("account") != right.get("account") or not _same_capture_day(left, right):
+    # 同一批次中的截图可能来自不同日期或文件复制时间，但仍是同一初次持仓快照。
+    # 名称、代码和金额完全一致时跨日期去重；金额不一致仍保留并记录冲突。
+    if left.get("account") != right.get("account"):
         return False
     left_code = str(left.get("code") or "").strip()
     right_code = str(right.get("code") or "").strip()
@@ -509,7 +760,8 @@ def _is_duplicate_candidate(left: dict, right: dict) -> bool:
         _name_similarity(left.get("name", ""), right.get("name", ""))
         >= NAME_SIMILARITY_THRESHOLD
     )
-    return code_match or high_name_similarity
+    missing_code = not left_code or not right_code
+    return code_match or (missing_code and high_name_similarity)
 
 
 def compare_snapshot_rows(left: dict, right: dict) -> dict:
@@ -546,6 +798,7 @@ def compare_snapshot_rows(left: dict, right: dict) -> dict:
         "name_similarity": name_similarity,
         "code_match": code_match,
         "code_relation": code_relation,
+        "same_capture_day": _same_capture_day(left, right),
         "amount_delta": amount_delta,
         "amount_match": amount_match,
         "status": status,
@@ -553,8 +806,55 @@ def compare_snapshot_rows(left: dict, right: dict) -> dict:
 
 
 def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
+    if not snapshots:
+        captured_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        payload = {
+            "captured_at": captured_at,
+            "account": normalize_account_name(DEFAULT_ACCOUNT),
+            "source_image": "",
+            "source_images": [],
+            "templates": [],
+            "template_counts": {},
+            "template_sources": [],
+            "rows": [],
+            "skipped_rows": [],
+            "pending_mapping_rows": [],
+        }
+        report = {
+            "template_counts": {},
+            "template_sources": [],
+            "input_row_count": 0,
+            "output_row_count": 0,
+            "duplicates_removed": 0,
+            "removed_duplicates": [],
+            "similar_but_kept": [],
+            "skipped_unsupported_rows": [],
+            "pending_mapping_rows": [],
+            "manual_review_rows": [],
+            "validation_warning_rows": [],
+        }
+        payload["comparison"] = {
+            "input_row_count": 0,
+            "output_row_count": 0,
+            "duplicates_removed": 0,
+        }
+        return payload, report
+
     account = normalize_account_name(snapshots[0].get("account", DEFAULT_ACCOUNT))
     source_images = [str(path) for snapshot in snapshots for path in snapshot.get("source_images", [])]
+    template_sources = [
+        {
+            "source_image": snapshot.get("source_image"),
+            "template": snapshot.get("template"),
+            "template_detection": snapshot.get("template_detection"),
+            "captured_at": snapshot.get("captured_at"),
+        }
+        for snapshot in snapshots
+    ]
+    template_counts: dict[str, int] = {}
+    for source in template_sources:
+        template_id = str(source.get("template") or "unknown")
+        template_counts[template_id] = template_counts.get(template_id, 0) + 1
     skipped_rows = [
         dict(item)
         for snapshot in snapshots
@@ -582,11 +882,24 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
         comparison = None
         evaluated = []
         for index, existing in enumerate(kept):
-            if not _is_duplicate_candidate(existing, row):
+            duplicate_candidate = _is_duplicate_candidate(existing, row)
+            high_name_similarity = (
+                _name_similarity(existing.get("name", ""), row.get("name", ""))
+                >= NAME_SIMILARITY_THRESHOLD
+            )
+            if not duplicate_candidate and not high_name_similarity:
                 continue
             comparison = compare_snapshot_rows(existing, row)
+            if comparison["status"] == "kept_both_amount_conflict":
+                existing_at = str(existing.get("captured_at") or "")
+                row_at = str(row.get("captured_at") or "")
+                if row_at > existing_at:
+                    comparison["status"] = "superseded_by_newer_snapshot"
             evaluated.append((existing, comparison))
-            if comparison["status"].startswith("duplicate_removed"):
+            if duplicate_candidate and (
+                comparison["status"].startswith("duplicate_removed")
+                or comparison["status"] == "superseded_by_newer_snapshot"
+            ):
                 duplicate_index = index
                 break
         if duplicate_index is None:
@@ -611,9 +924,12 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
             continue
 
         existing = kept[duplicate_index]
-        for field in ("code", "name", "market_value", "profit", "profit_pct"):
-            if existing.get(field) in (None, "") and row.get(field) not in (None, ""):
-                existing[field] = row[field]
+        if comparison and comparison["status"] == "superseded_by_newer_snapshot":
+            kept[duplicate_index] = dict(row)
+        else:
+            for field in ("code", "name", "market_value", "profit", "profit_pct"):
+                if existing.get(field) in (None, "") and row.get(field) not in (None, ""):
+                    existing[field] = row[field]
         comparisons.append({
             "kept": {
                 "code": existing.get("code"),
@@ -635,12 +951,14 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
     captured_at = max(captured_values) if captured_values else datetime.now().astimezone().isoformat(timespec="seconds")
     output_rows = [
         {
+            "template": item.get("template"),
             "code": item.get("code"),
             "name": item.get("name"),
             "ocr_name": item.get("ocr_name") or item.get("name"),
             "market_value": item.get("market_value"),
             "profit": item.get("profit"),
             "profit_pct": item.get("profit_pct"),
+            "daily_profit_ocr": item.get("daily_profit_ocr"),
             "ocr_profit": item.get("ocr_profit"),
             "cumulative_profit_ocr": item.get("cumulative_profit_ocr"),
             "ocr_rate": item.get("ocr_rate"),
@@ -661,11 +979,16 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
         "account": account,
         "source_image": source_images[0] if source_images else "",
         "source_images": source_images,
+        "templates": sorted(template_counts),
+        "template_counts": template_counts,
+        "template_sources": template_sources,
         "rows": output_rows,
         "skipped_rows": skipped_rows,
         "pending_mapping_rows": pending_mapping_rows,
     }
     comparison_report = {
+        "template_counts": template_counts,
+        "template_sources": template_sources,
         "rules": {
             "name_similarity_threshold": NAME_SIMILARITY_THRESHOLD,
             "amount_absolute_tolerance": AMOUNT_ABS_TOLERANCE,
@@ -673,6 +996,7 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
             "rate_absolute_tolerance": RATE_ABS_TOLERANCE,
             "rate_relative_tolerance": RATE_REL_TOLERANCE,
             "different_non_empty_codes_are_kept_separately": True,
+            "cross_date_exact_duplicates_are_removed": True,
         },
         "input_row_count": len(flattened),
         "output_row_count": len(output_rows),
@@ -718,11 +1042,13 @@ def merge_snapshot_inputs(snapshots: list[dict]) -> tuple[dict, dict]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="把一张或多张持仓截图 OCR、对比去重并生成结构化输入 JSON")
+    parser = argparse.ArgumentParser(description="本地识别持仓与交易截图并生成结构化数据")
     parser.add_argument("images", nargs="*", help="截图路径；可一次传入多张")
     parser.add_argument("--image", dest="option_images", nargs="+", action="append", default=[], help="截图路径；可重复使用")
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--comparison-output", default=str(DEFAULT_COMPARISON_OUTPUT))
+    parser.add_argument("--pending-output", default=str(DEFAULT_PENDING_OUTPUT))
+    parser.add_argument("--confirmed-output", default=str(DEFAULT_CONFIRMED_OUTPUT))
     args = parser.parse_args()
 
     explicit = list(args.images)
@@ -731,14 +1057,71 @@ def main() -> None:
     image_paths = find_images(explicit or None)
 
     snapshots = []
-    parsed_by_image = []
+    transaction_rows = []
+    document_records = []
+    mapping = load_fund_names()
     for image_path in image_paths:
         ocr_path, ocr = run_windows_ocr(image_path)
+        document_type = detect_transaction_screenshot(ocr)
+        if document_type:
+            parsed_transactions = parse_transaction_ocr(ocr, image_path, mapping)
+            transaction_rows.extend(parsed_transactions)
+            document_records.append({
+                "image_path": image_path,
+                "ocr_path": ocr_path,
+                "document_type": document_type,
+                "rows": parsed_transactions,
+            })
+            continue
+
         payload, parsed = build_input(image_path, ocr)
         snapshots.append(payload)
-        parsed_by_image.append((image_path, ocr_path, parsed))
+        document_records.append({
+            "image_path": image_path,
+            "ocr_path": ocr_path,
+            "document_type": "holding_snapshot",
+            "template": payload["template_detection"],
+            "rows": parsed,
+        })
+
+    transaction_rows = merge_pending_rows(transaction_rows)
+    pending_rows = [
+        row for row in transaction_rows
+        if any(marker in str(row.get("状态", "")) for marker in ("进行中", "处理中", "待确认"))
+    ]
+    confirmed_rows = confirmed_transaction_rows(transaction_rows)
+    pending_output = Path(args.pending_output)
+    confirmed_output = Path(args.confirmed_output)
+    if pending_rows:
+        write_pending_transactions(pending_output, pending_rows)
+    else:
+        print("未识别到交易进行中截图，保留已有待确认交易文件")
+    if confirmed_rows:
+        write_confirmed_transactions(confirmed_output, confirmed_rows)
+    else:
+        print("未识别到已确认后续交易")
 
     merged, comparison_report = merge_snapshot_inputs(snapshots)
+    transaction_sources = [
+        {
+            "source_image": str(item["image_path"]),
+            "document_type": item["document_type"],
+            "row_count": len(item["rows"]),
+        }
+        for item in document_records
+        if item["document_type"] != "holding_snapshot"
+    ]
+    document_counts = {
+        "holding_snapshot": len(snapshots),
+        "transaction_activity": len(transaction_sources),
+        "pending_transaction_rows": len(pending_rows),
+        "confirmed_transaction_rows": len(confirmed_rows),
+    }
+    merged["document_counts"] = document_counts
+    merged["transaction_sources"] = transaction_sources
+    comparison_report["document_counts"] = document_counts
+    comparison_report["transaction_sources"] = transaction_sources
+
     output = Path(args.output)
     comparison_output = Path(args.comparison_output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -747,12 +1130,21 @@ def main() -> None:
     comparison_output.write_text(json.dumps(comparison_report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     print(f"处理截图: {len(image_paths)} 张")
-    for image_path, ocr_path, parsed in parsed_by_image:
-        print(f"截图: {image_path}")
-        print(f"OCR文件: {ocr_path}")
-        for item in parsed:
-            print(item)
-    print(f"结构化输入: {output}")
+    for item in document_records:
+        print(f"截图: {item['image_path']}")
+        if item["document_type"] == "holding_snapshot":
+            template_info = item["template"]
+            print(f"识别类型: 持仓截图 | {template_info['name']} | 置信度={template_info['confidence']}")
+        else:
+            print(f"识别类型: 交易截图 | {item['document_type']} | {len(item['rows'])} 笔")
+        print(f"OCR文件: {item['ocr_path']}")
+        for row in item["rows"]:
+            print(row)
+    print(f"结构化持仓输入: {output}")
+    if pending_rows:
+        print(f"待确认交易: {pending_output} | {len(pending_rows)} 笔")
+    if confirmed_rows:
+        print(f"后续交易: {confirmed_output} | {len(confirmed_rows)} 笔")
     if comparison_report.get("skipped_unsupported_rows"):
         print(f"跳过不支持的资产: {len(comparison_report['skipped_unsupported_rows'])} 项")
         for item in comparison_report["skipped_unsupported_rows"]:
@@ -780,9 +1172,7 @@ def main() -> None:
         print(
             f"相似但保留: {item['left']['code']} {item['left']['name']} / "
             f"{item['right']['code']} {item['right']['name']}，"
-            f"名称相似度={detail['name_similarity']}，"
-            f"代码一致={detail['code_match']}，"
-            f"金额差={detail['amount_delta']}，状态={detail['status']}"
+            f"名称相似度={detail['name_similarity']}，状态={detail['status']}"
         )
 
 

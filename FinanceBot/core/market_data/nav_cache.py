@@ -79,6 +79,7 @@ def update_cache(
     *,
     retries: int = 2,
     retry_delay: float = 1.0,
+    offline: bool = False,
 ) -> Dict:
     """批量更新本地净值缓存。失败的基金保留旧值并记录错误。"""
     path = Path(cache_path)
@@ -88,6 +89,11 @@ def update_cache(
     errors = dict(current.get("errors", {}))
 
     for code in dict.fromkeys(codes):
+        if offline:
+            if code not in funds:
+                errors[code] = "离线模式下本地净值缓存缺少该基金"
+            continue
+
         last_error = None
         for attempt in range(retries + 1):
             try:

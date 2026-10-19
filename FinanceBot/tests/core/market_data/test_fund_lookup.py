@@ -3,9 +3,11 @@ from pathlib import Path
 from core.market_data.fund_lookup import (
     FundCandidate,
     load_mapping,
+    normalize_fund_name,
     resolve_fund_name,
     save_mapping_entry,
     select_candidate,
+    share_class,
 )
 
 
@@ -52,7 +54,7 @@ def test_ambiguous_api_candidates_are_preserved_for_review():
 
 
 def test_api_resolved_alias_is_saved_and_reused_locally():
-    mapping_path = Path(__file__).with_name("_tmp_fund_mapping.csv")
+    mapping_path = Path(__file__).with_name("临时基金名称代码映射.csv")
     try:
         save_mapping_entry(
             mapping_path,
@@ -75,3 +77,51 @@ def test_api_resolved_alias_is_saved_and_reused_locally():
         assert result.source == "local_mapping"
     finally:
         mapping_path.unlink(missing_ok=True)
+
+
+
+def test_ocr_confusables_and_truncated_names_resolve_to_local_mapping():
+    mapping = {
+        "永赢先锋半导体智选混合A": "025208",
+        "华泰柏瑞南方东英恒生科技指数ETF联接(QDII)A": "015310",
+        "广发中债7-10年期国开行债券指数A": "003376",
+        "永赢科技智选混合A": "022364",
+    }
+
+    for query, code in [
+        ("永蠃先锋半导体智选混合A", "025208"),
+        ("华泰柏踹南方东英恒生科技指", "015310"),
+        ("广发中债710年一期国开行债券", "003376"),
+        ("永蠃科技智选混", "022364"),
+    ]:
+        result = resolve_fund_name(query, mapping, lookup=lambda _: [])
+        assert result.status == "resolved"
+        assert result.code == code
+        assert result.source == "local_mapping"
+
+
+
+def test_qdii_ocr_variants_normalize_and_keep_share_class():
+    for name in [
+        "华宝致远混合(QD围A",
+        "华宝致远混合(QDΧA",
+        "华宝致远混合(QDحI)A",
+        "华宝致远混合(QDII)A",
+    ]:
+        normalized = normalize_fund_name(name)
+        assert "QDII" in normalized
+        assert share_class(name) == "A"
+
+    assert share_class("华宝致远混合(QD围C") == "C"
+
+
+def test_local_mapping_does_not_cross_a_and_c_share_classes():
+    mapping = {
+        "华宝致远混合(QDII)A": "008253",
+        "华宝致远混合(QDII)C": "008254",
+    }
+
+    result = resolve_fund_name("华宝致远混合(QD围A", mapping, lookup=lambda _: [])
+
+    assert result.status == "resolved"
+    assert result.code == "008253"

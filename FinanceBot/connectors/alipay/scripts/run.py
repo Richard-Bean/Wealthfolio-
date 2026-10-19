@@ -9,8 +9,8 @@ run.py —— 支付宝连接器一键运行入口
 流程:
     解析PDF -> 拉取最新净值(可关) -> 计算持仓 -> 导出CSV -> 对账校验
 产物（data/processed/alipay/ 下）:
-    fund_positions.csv       持仓汇总（每只基金一行）
-    wealthfolio_import.csv   Wealthfolio 可导入的交易流水
+    基金持仓表.csv       持仓汇总（每只基金一行）
+    资产导入表.csv   Wealthfolio 可导入的交易流水
 """
 
 import logging
@@ -27,11 +27,11 @@ from connectors.alipay import exporter, nav_provider, statement_parser  # noqa: 
 from connectors.wealthfolio import exporter as wf_exporter  # noqa: E402
 from core.normalizer import position_calculator, validator  # noqa: E402
 
-# 运行日志（logs/alipay_fund_csv.log）
+# 运行日志（logs/支付宝基金导出.log）
 _LOG_DIR = REPO_ROOT / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
-    filename=str(_LOG_DIR / "alipay_fund_csv.log"),
+    filename=str(_LOG_DIR / "支付宝基金导出.log"),
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     encoding="utf-8",
@@ -73,8 +73,8 @@ def main():
 
     # 4. 导出 CSV
     print("[4/5] 导出 CSV ...")
-    pos_csv = os.path.join(config.OUTPUT_DIR, "fund_positions.csv")
-    wf_csv = os.path.join(config.OUTPUT_DIR, "wealthfolio_import.csv")
+    pos_csv = os.path.join(config.OUTPUT_DIR, "基金持仓表.csv")
+    wf_csv = os.path.join(config.OUTPUT_DIR, "资产导入表.csv")
     exporter.export_positions_csv(positions, pos_csv)
     wf_exporter.export_wealthfolio_csv(trades, wf_csv, account=config.ACCOUNT_NAME)
 

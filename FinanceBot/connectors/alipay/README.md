@@ -1,8 +1,8 @@
 # connectors/alipay —— 支付宝（蚂蚁财富）连接器
 
 把**蚂蚁财富「基金交易明细」交割单 PDF**（支付宝邮箱下载的那份）解析为标准化交易明细，并驱动整条流水线，最终产出：
-1. **持仓汇总 CSV**（`fund_positions.csv`，每只基金一行：份额/成本/最新净值/市值/盈亏）
-2. **Wealthfolio 导入流水 CSV**（`wealthfolio_import.csv`，逐笔 buy/sell 活动）
+1. **持仓汇总 CSV**（`基金持仓表.csv`，每只基金一行：份额/成本/最新净值/市值/盈亏）
+2. **Wealthfolio 导入流水 CSV**（`资产导入表.csv`，逐笔 buy/sell 活动）
 
 归属说明（按 FinanceBot 架构）：
 - 本目录 = 支付宝**来源适配**：PDF 解析、天天基金净值数据源、连接器配置与一键入口；
@@ -43,7 +43,7 @@ connectors/alipay/
 - `core/normalizer/`        position_calculator.py（摊薄成本法）、validator.py（对账校验）
 - `connectors/wealthfolio/` exporter.py（Wealthfolio 导入 CSV）
 - `config/config.yaml`      全局配置（账户名、联网开关、目录）
-- `logs/`                   run.py 运行日志（alipay_fund_csv.log）
+- `logs/`                   run.py 运行日志（支付宝基金导出.log）
 
 ## 数据流
 
@@ -85,10 +85,10 @@ connectors/alipay/
 
 ## 已知边界
 
-- QDII 基金净值更新滞后（T+1~T+2），`fund_positions.csv` 中的「净值日期」会标注实际净值归属日。
+- QDII 基金净值更新滞后（T+1~T+2），`基金持仓表.csv` 中的「净值日期」会标注实际净值归属日。
 - 持仓市值 = 份额 × 最新净值，与支付宝 APP 实时估值可能存在小幅差异（口径不同）。
 - 交割单默认仅覆盖申请的时间段；跨多年持仓需分时段申请多份 PDF，分别运行后自行合并。
-- 截图基金代码优先使用 `data/processed/alipay/fund_mapping.csv`；本地没有高可信匹配时才查询公开基金搜索 API。
+- 截图基金代码优先使用 `data/processed/alipay/基金名称代码映射.csv`；本地没有高可信匹配时才查询公开基金搜索 API。
 - API 候选存在歧义或查询失败时，原始 OCR 行会保存在 `pending_mapping_rows`，不会被猜测映射或直接删除。
 - 同一代码出现不同金额时保留全部记录并报告冲突，由用户或后续映射修复处理。
 
@@ -129,8 +129,8 @@ FinanceBot/docs/templates/持仓截图模板_打码.jpg
 输出：
 
 ```text
-data/processed/alipay/wealthfolio_import_auto.csv
-data/export/wealthfolio_import_auto.csv
+data/processed/alipay/资产导入表_自动.csv
+data/export/资产导入表_自动.csv
 ```
 
 支持右键“以管理员身份运行”之外的普通双击。也可以把图片路径作为参数传给 BAT。若布局不是支付宝/养基宝“我的持有”列表布局，需要新增 OCR 布局适配规则。

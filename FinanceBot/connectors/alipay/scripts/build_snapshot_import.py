@@ -2,7 +2,7 @@
 """
 从持仓截图字段 + 本地净值缓存生成 Wealthfolio CSV。
 
-不读取交割单 PDF、交易流水或 fund_positions.csv。
+不读取交割单 PDF、交易流水或 基金持仓表.csv。
 截图金额/收益是权威输入；净值只用于反推持有份额。
 """
 
@@ -21,9 +21,9 @@ sys.path.insert(0, str(REPO_ROOT))
 from connectors.alipay.config import ACCOUNT_NAME
 from core.market_data.nav_cache import latest_nav_asof, load_cache
 from core.normalizer.snapshot_validation import validate_snapshot_values
-DEFAULT_CACHE = REPO_ROOT / "data" / "processed" / "market_data" / "nav_cache.json"
-DEFAULT_OUTPUT = REPO_ROOT / "data" / "processed" / "alipay" / "wealthfolio_import.csv"
-DEFAULT_EXPORT = REPO_ROOT / "data" / "export" / "wealthfolio_import_2026-10-09.csv"
+DEFAULT_CACHE = REPO_ROOT / "data" / "processed" / "market_data" / "净值缓存.json"
+DEFAULT_OUTPUT = REPO_ROOT / "data" / "processed" / "alipay" / "资产导入表.csv"
+DEFAULT_EXPORT = REPO_ROOT / "data" / "export" / "资产导入表_2026-10-09.csv"
 DEFAULT_ACCOUNT = ACCOUNT_NAME
 LEGACY_ACCOUNT_NAMES = {"蚂蚁财富——测试B"}
 

@@ -22,6 +22,7 @@ SEARCH_API = (
 LOCAL_FUZZY_THRESHOLD = 0.88
 ONLINE_FUZZY_THRESHOLD = 0.82
 ONLINE_SCORE_MARGIN = 0.05
+QDII_OCR_RE = re.compile(r"QD.{0,4}?(?=[A-Ca-c人民币()（）]|$)", re.S)
 
 
 @dataclass(frozen=True)
@@ -46,8 +47,11 @@ class FundMatch:
 def normalize_fund_name(value: str) -> str:
     text = unicodedata.normalize("NFKC", str(value)).upper()
     text = text.replace("IOO", "100").replace("LOO", "100")
-    text = re.sub(r"QD(?:II|Ⅱ|11|围|团|图)+", "QDII", text)
-    text = re.sub(r"基金|进阶理财|定投|金选|灵活取用|CNY", "", text)
+    text = text.replace("蠃", "赢").replace("踹", "瑞")
+    text = QDII_OCR_RE.sub("QDII", text)
+    text = re.sub(r"(?<=[0-9])一(?=[0-9])", "-", text)
+    text = re.sub(r"年一期", "年期", text)
+    text = re.sub(r"基金|进阶理财|稳健理财|定投|金选|灵活取用|CNY", "", text)
     return "".join(char for char in text if char.isalnum())
 
 
@@ -58,16 +62,15 @@ def name_similarity(left: str, right: str) -> float:
         return 0.0
     if left_name == right_name:
         return 1.0
+    shorter, longer = sorted((left_name, right_name), key=len)
+    if len(shorter) >= 6 and longer.startswith(shorter):
+        return 0.92 + 0.08 * len(shorter) / len(longer)
     return difflib.SequenceMatcher(None, left_name, right_name).ratio()
 
 
 def company_hint(name: str) -> str:
-    normalized = unicodedata.normalize("NFKC", str(name))
-    match = re.match(
-        r"^([\u4e00-\u9fff]{2,4}?)(?=纳斯达克|全球|中债|恒生|科技|先锋|成长|海外|致远|光伏|生物医药|港股)",
-        normalized,
-    )
-    return match.group(1) if match else normalized[:2]
+    normalized = normalize_fund_name(name)
+    return normalized[:2]
 
 
 def company_compatible(left: str, right: str) -> bool:
@@ -234,11 +237,12 @@ def resolve_fund_name(
 ) -> FundMatch:
     local_candidates = []
     for name, code in mapping.items():
-        if not company_compatible(query, name):
+        candidate = FundCandidate(code, name, source="local_mapping")
+        if not candidate_compatible(query, candidate):
             continue
         score = name_similarity(query, name)
         if score >= LOCAL_FUZZY_THRESHOLD:
-            local_candidates.append((score, FundCandidate(code, name, source="local_mapping")))
+            local_candidates.append((score, candidate))
     local_candidates.sort(key=lambda item: item[0], reverse=True)
     if local_candidates:
         score, candidate = local_candidates[0]

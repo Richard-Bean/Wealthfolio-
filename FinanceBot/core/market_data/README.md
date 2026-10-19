@@ -62,7 +62,7 @@ D:\my-code-project\Wealthfolio中国金融同步连接器架构设计\FinanceBot
 路径：
 
 ```text
-FinanceBot/data/processed/market_data/nav_cache.json
+FinanceBot/data/processed/market_data/净值缓存.json
 ```
 
 缓存写入使用同目录临时文件和原子替换；单只基金失败不会破坏已有缓存。

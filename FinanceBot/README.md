@@ -26,7 +26,7 @@ FinanceBot/
 │   └── config.yaml           # 全局配置（连接器开关、账户名、目录等）
 ├── tests/
 │   └── connectors/alipay/    # 支付宝连接器冒烟测试（不依赖 PDF/网络）
-└── logs/                     # 运行日志（alipay_fund_csv.log）
+└── logs/                     # 运行日志（支付宝基金导出.log）
 ```
 
 ## 快速开始（支付宝 → Wealthfolio）
@@ -43,7 +43,7 @@ pip install -r connectors/alipay/requirements.txt
 python connectors/alipay/scripts/run.py
 ```
 
-产物：`data/processed/alipay/fund_positions.csv`（持仓汇总）、`data/processed/alipay/wealthfolio_import.csv`（可直接导入 Wealthfolio）。
+产物：`data/processed/alipay/基金持仓表.csv`（持仓汇总）、`data/processed/alipay/资产导入表.csv`（可直接导入 Wealthfolio）。
 
 ## 测试
 
@@ -70,12 +70,12 @@ python -m pytest tests/ -v
 
 ## 截图基金名称映射
 
-- 独立映射表：`data/processed/alipay/fund_mapping.csv`；
-- `fund_positions.csv` 只作为旧数据来源之一，不再承担完整基金字典职责；
+- 独立映射表：`data/processed/alipay/基金名称代码映射.csv`；
+- `基金持仓表.csv` 只作为旧数据来源之一，不再承担完整基金字典职责；
 - 本地匹配相似度阈值为 `0.88`，并要求基金公司、A/C 份额类别和人民币/美元币种一致；
 - 本地没有高可信匹配时，保留 OCR 原始名称并调用公开基金搜索 API；
 - API 候选过于接近、相似度过低或网络失败时进入 `pending_mapping_rows`，不猜测代码；
-- 自动确认的 API 结果写入 `fund_mapping.csv`，后续运行可离线复用。
+- 自动确认的 API 结果写入 `基金名称代码映射.csv`，后续运行可离线复用。
 
 ## 截图数值校验
 
@@ -109,3 +109,14 @@ python -m pytest tests/ -v
 ## 隐私
 
 交割单 PDF 含姓名、身份证号等个人信息。`.gitignore` 已忽略 `data/raw/alipay/*.pdf` 与 `data/processed/alipay/*.csv`；请勿上传到不受信任的第三方。
+## 本地交易截图识别
+
+截图解析完全在本机执行：使用 Windows OCR 提取文字，再用固定规则识别页面类型和字段，不调用 AI 模型或云端解析服务。基金代码只通过本地 `基金名称代码映射.csv` 匹配。
+
+程序会自动区分：
+
+- 持仓截图：进入持仓快照解析；
+- 交易进行中截图：生成 `待确认交易.csv`；
+- 已确认交易截图：生成 `后续交易_2026-10-12.csv`。
+
+两张以上截图中的相同订单会按交易时间、基金、金额和状态去重。净值更新默认使用 `净值缓存.json` 离线运行；只有显式去掉 `--offline` 时才会访问公开净值接口。

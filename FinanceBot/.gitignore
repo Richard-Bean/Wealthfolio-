@@ -11,9 +11,16 @@ docs/templates/*.jpg
 
 # 生成的持仓/流水 CSV（个人资产数据）
 data/processed/alipay/*.csv
+data/processed/alipay/*.json
+data/processed/alipay/*.log
 data/export/*.csv
+# 对账阶段生成的持仓、交易、报告、日志和核验截图
+data/processed/reconciliation/*
+!data/processed/reconciliation/alipay/
+data/processed/reconciliation/alipay/*
+!data/processed/reconciliation/alipay/.gitkeep
 # 基金名称/代码映射只含公开基金信息，不含账户数据，需要纳入版本控制
-!data/processed/alipay/fund_mapping.csv
+!data/processed/alipay/基金名称代码映射.csv
 
 # 基金净值缓存（非核心代码，但包含查询痕迹）
 data/processed/market_data/*.json

@@ -17,7 +17,7 @@ Thumbs.db
 # ===== OCR / 净值缓存中间文件 =====
 .paddlex-cache/
 pytest-cache-files-*/
-*_ocr.txt
-snapshot_input.auto.json
-
-snapshot_comparison.json
+*_识别文本.txt
+识别文本_*.txt
+持仓快照输入.json
+持仓快照对比报告.json

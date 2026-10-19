@@ -30,16 +30,38 @@ FinanceBot/data/raw/alipay
 FinanceBot/docs/templates/持仓截图模板_打码.jpg
 ```
 
+### 两种截图模板
+
+程序会先根据页面标题、列标题和数字列位置识别截图模板，再调用对应解析规则：
+
+- `全部持有` 模板：名称/金额、日收益、持有收益、累计收益四列；
+- `我的持有` 模板：名称、金额/昨日收益、持有收益/率三列。
+
+状态栏、顶部导航、营销卡片、筛选标签、底部导航、系统手势栏和“基金/进阶理财”等标签角标会被排除，
+不参与持仓名称和数值解析。识别到的模板、置信度和判断依据会写入 JSON 与对比报告。
+
 ### 多图整合与数据对比
 
 程序可以同时处理多张截图，最终生成一份 CSV。每张截图会分别 OCR 和解析，然后统一进行数据对比：
 
 - 对名称、基金代码、持有金额进行全面比较；
-- 同一账户、同一日期下，名称高度相似或代码相同的记录视为重复候选；
+- 同一批次同一账户下，即使截图日期不同，名称和代码相同且金额一致的记录仍视为重复候选；
 - 重复记录只保留一项；
 - 如果名称高度相似但代码不同（例如联接 A / 联接 C），会保留为两项；
 - 如果同一代码的金额不一致，全部保留并标记冲突，不再任意删除；
 - 不同基金代码不会因为名称相似而被误合并。
+
+### 已修复：跨日期重复项
+
+曾经出现过同一基金在 CSV 中重复两次的问题。原因是旧去重规则要求两条记录的截图日期相同，
+而同一批次中的截图可能分别来自 10 月 12 日和 10 月 13 日；即使名称、代码和金额完全一致，
+仍会被当作两个不同快照。最终 CSV 又统一写入同一个日期，因此表现为完全重复。
+
+现在的解决方法是：同一批次同一账户内，即使截图日期不同，只要名称、代码和金额一致，就只保留一项；
+如果金额不同，则全部保留并在对比报告中标记冲突。实测 33 条输入记录去重后保留 23 条，无完全重复项。
+
+如果重新运行后导出 CSV 仍未更新，通常是因为该文件正被 Excel 等程序占用。关闭文件后重新运行
+`运行截图转CSV.bat` 即可覆盖旧结果。
 
 ### OCR 数据校验
 
@@ -57,7 +79,7 @@ FinanceBot/docs/templates/持仓截图模板_打码.jpg
 这些校验主要提升 OCR 识别后数据的准确性，降低识别错误对持仓成本、收益分析和后续交易推断的影响；
 同一套异常检测和人工复核规则也可以用于其他基于截图 OCR 的数据入口。
 
-基金名称先使用本地 `fund_mapping.csv` 进行高可信匹配。本地没有匹配时先保留原始 OCR 行，再调用
+基金名称先使用本地 `基金名称代码映射.csv` 进行高可信匹配。本地没有匹配时先保留原始 OCR 行，再调用
 公开基金搜索 API 查找候选；只有基金公司、份额类别、币种和名称均匹配时才自动补全代码，歧义项进入
 待确认列表。匹配结果会保存回本地映射表，后续离线复用。
 
@@ -66,24 +88,35 @@ FinanceBot/docs/templates/持仓截图模板_打码.jpg
 积存金、黄金理财等非模板数据暂时无法识别为基金，也不会进入当前基金 CSV。程序会搁置并跳过这些记录，继续处理其他截图，跳过原因记录在：
 
 ```text
-D:\my-code-project\Wealthfolio中国金融同步连接器架构设计\FinanceBot\data\processed\alipay\snapshot_comparison.json
+D:\my-code-project\Wealthfolio中国金融同步连接器架构设计\FinanceBot\data\processed\alipay\持仓快照对比报告.json
 ```
 
 对比过程会生成：
 
 ```text
-FinanceBot/data/processed/alipay/snapshot_input.auto.json
-FinanceBot/data/processed/alipay/snapshot_comparison.json
+FinanceBot/data/processed/alipay/持仓快照输入.json
+FinanceBot/data/processed/alipay/持仓快照对比报告.json
 ```
 
 最终仍生成原来格式的一个 Wealthfolio CSV（不会每张截图各生成一个 CSV）：
 
 ```text
-FinanceBot/data/export/wealthfolio_import_auto.csv
+FinanceBot/data/export/资产导入表_自动.csv
 ```
 
-同时会在 `FinanceBot/data/processed/alipay/wealthfolio_import_auto.csv` 保留同内容的工作副本。CSV 列保持不变：
+同时会在 `FinanceBot/data/processed/alipay/资产导入表_自动.csv` 保留同内容的工作副本。CSV 列保持不变：
 
 ```text
 date,account,activityType,symbol,isin,quantity,unitPrice,amount,currency,fee,tax,comment
 ```
+## 本地交易截图识别
+
+截图解析完全在本机执行：使用 Windows OCR 提取文字，再用固定规则识别页面类型和字段，不调用 AI 模型或云端解析服务。基金代码只通过本地 `基金名称代码映射.csv` 匹配。
+
+程序会自动区分：
+
+- 持仓截图：进入持仓快照解析；
+- 交易进行中截图：生成 `待确认交易.csv`；
+- 已确认交易截图：生成 `后续交易_2026-10-12.csv`。
+
+两张以上截图中的相同订单会按交易时间、基金、金额和状态去重。净值更新默认使用 `净值缓存.json` 离线运行；只有显式去掉 `--offline` 时才会访问公开净值接口。

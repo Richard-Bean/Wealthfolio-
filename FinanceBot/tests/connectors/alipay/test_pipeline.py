@@ -66,7 +66,7 @@ def test_positions():
 
 def test_wealthfolio_export(tmp_path=None):
     trades = _sample_trades()
-    out = os.path.join(str(tmp_path) if tmp_path else tempfile.gettempdir(), "wf_test.csv")
+    out = os.path.join(str(tmp_path) if tmp_path else tempfile.gettempdir(), "临时测试导入表.csv")
     wf_exporter.export_wealthfolio_csv(trades, out, account="测试账户")
 
     wf = pd.read_csv(out, dtype={"symbol": str})  # symbol 是基金代码，必须按文本读，避免前导零丢失

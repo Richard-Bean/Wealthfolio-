@@ -3,7 +3,7 @@
 holding_snapshot.py —— 持仓快照字段体系（对齐蚂蚁财富「持有」详情页）
 
 职责：把「持有」列表页的稀疏字段（金额 / 昨日收益 / 持有收益 / 率）
-补全为详情页的 9 字段快照，并导出与 fund_positions.csv 同风格的 CSV。
+补全为详情页的 9 字段快照，并导出与 基金持仓表.csv 同风格的 CSV。
 
 字段口径（与蚂蚁财富 APP 持有详情页一致，已用实测截图对拍）：
     持有金额    当前持仓市值
@@ -164,7 +164,7 @@ def to_dataframe(items: Iterable[HoldingSnapshot]) -> pd.DataFrame:
 
 
 def export_csv(items: Iterable[HoldingSnapshot], out_path: str):
-    """持仓快照 -> CSV（utf-8-sig，Excel 直接打开不乱码，与 fund_positions.csv 同风格）。"""
+    """持仓快照 -> CSV（utf-8-sig，Excel 直接打开不乱码，与 基金持仓表.csv 同风格）。"""
     to_dataframe(items).to_csv(out_path, index=False, encoding="utf-8-sig")
     print(f"[导出] 持仓快照: {out_path}")
 
@@ -232,6 +232,6 @@ if __name__ == "__main__":
     df = to_dataframe(items)
     print(df.to_string(index=False))
 
-    out = Path(__file__).resolve().parents[2] / "data" / "processed" / "alipay" / "holdings_snapshot.csv"
+    out = Path(__file__).resolve().parents[2] / "data" / "processed" / "alipay" / "持仓快照表.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     export_csv(items, str(out))

@@ -1,8 +1,0 @@
-基金代码,标准基金名称,OCR别名,匹配方式,确认状态,数据来源
-016452,南方纳斯达克100指数(QDII)A,南方纳斯达克100指数(QDII)A,exact,confirmed,fund_positions
-040046,华安纳斯达克100ETF联接(QDII)A,华安纳斯达克100ETF联接(QDII)A,exact,confirmed,fund_positions
-160213,国泰纳斯达克100指数(QDII),国泰纳斯达克100指数(QDII),exact,confirmed,fund_positions
-270042,广发纳斯达克100ETF联接人民币(QDII)A,广发纳斯达克100ETF联接(QDII)A,alias,confirmed,eastmoney_pingzhongdata
-019736,宝盈纳斯达克100指数发起(QDII)A人民币,宝盈纳斯达克100指数(QDII)A,online_api,confirmed,eastmoney_fund_search
-019172,摩根纳斯达克100指数(QDII)人民币A,摩根纳斯达克100指数(QDII)A,online_api,confirmed,eastmoney_fund_search
-019441,万家纳斯达克100指数发起式(QDII)A,万家纳斯达克100指数(QDII)A,online_api,confirmed,eastmoney_fund_search

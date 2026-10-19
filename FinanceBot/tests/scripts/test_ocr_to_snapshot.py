@@ -7,7 +7,11 @@ SCRIPTS_ROOT = Path(__file__).resolve().parents[2] / "scripts"
 sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from ocr_to_snapshot import (
+    _clean_row_name,
     DEFAULT_ACCOUNT,
+    TEMPLATE_ALL_HOLDINGS,
+    TEMPLATE_MY_HOLDINGS,
+    detect_template,
     compare_snapshot_rows,
     find_images,
     merge_snapshot_inputs,
@@ -200,3 +204,132 @@ def test_parse_ocr_flags_rate_mismatch_without_repair_source():
         issue["code"] == "ocr_rate_mismatch"
         for issue in rows[0]["validation_errors"]
     )
+
+
+
+def template_header(text, y):
+    return line([word(part, 0, y) for part in [text]])
+
+
+def test_detect_template_uses_page_and_column_markers():
+    all_holdings = {"lines": [template_header("全部持有 名称/金额 日收益 持有收益 累计收益", 400)]}
+    my_holdings = {"lines": [template_header("我的持有 名称 金额/昨日收益 持有收益/率", 700)]}
+
+    assert detect_template(all_holdings, 1080)["id"] == TEMPLATE_ALL_HOLDINGS
+    assert detect_template(my_holdings, 1080)["id"] == TEMPLATE_MY_HOLDINGS
+
+
+def test_all_holdings_template_ignores_status_badges_and_page_edges():
+    ocr = {
+        "lines": [
+            template_header("全部持有 名称/金额 日收益 持有收益 累计收益", 400),
+            line([word("13:30", 50, 40)]),
+            line([word("2,637.01", 70, 663)]),
+            line([word("占比12.67%", 70, 715)]),
+            line([word("-93.87", 410, 663)]),
+            line([word("-428.10", 650, 663)]),
+            line([word("-13.97%", 650, 717)]),
+            line([word("-428.10", 900, 663)]),
+        ],
+        "words": [
+            word("13:30", 50, 40),
+            word("永赢先锋半导体智选混合A", 60, 531),
+            word("基金", 70, 594),
+            word("进阶理财", 150, 594),
+            word("2,637.01", 70, 663),
+            word("占比12.67%", 70, 715),
+            word("-93.87", 410, 663),
+            word("-428.10", 650, 663),
+            word("-13.97%", 650, 717),
+            word("-428.10", 900, 663),
+        ],
+    }
+
+    rows = parse_ocr(ocr, image_width=1080)
+
+    assert len(rows) == 1
+    assert rows[0]["template"] == TEMPLATE_ALL_HOLDINGS
+    assert rows[0]["name"] == "永赢先锋半导体智选混合A"
+    assert rows[0]["market_value"] == 2637.01
+    assert rows[0]["cumulative_profit_ocr"] == -428.10
+
+
+def test_my_holdings_template_uses_combined_columns_and_ignores_page_edges():
+    ocr = {
+        "lines": [
+            template_header("我的持有 名称 金额/昨日收益 持有收益/率", 750),
+            line([word("19", 500, 300)]),
+            line([word("2,637.01", 520, 900)]),
+            line([word("-93.87", 520, 966)]),
+            line([word("-428.10", 860, 900)]),
+            line([word("-13.97%", 860, 966)]),
+            line([word("59", 950, 2300)]),
+        ],
+        "words": [
+            word("19", 500, 300),
+            word("永赢先锋半导体智选混合A", 60, 900),
+            word("2,637.01", 520, 900),
+            word("-93.87", 520, 966),
+            word("-428.10", 860, 900),
+            word("-13.97%", 860, 966),
+            word("59", 950, 2300),
+        ],
+    }
+
+    rows = parse_ocr(ocr, image_width=1080)
+
+    assert len(rows) == 1
+    assert rows[0]["template"] == TEMPLATE_MY_HOLDINGS
+    assert rows[0]["name"] == "永赢先锋半导体智选混合A"
+    assert rows[0]["market_value"] == 2637.01
+    assert rows[0]["daily_profit_ocr"] == -93.87
+    assert rows[0]["cumulative_profit_ocr"] is None
+
+
+
+def test_same_code_and_amount_duplicate_across_capture_days_is_removed():
+    first = snapshot_row("017125", "华宝港股互联网ETF联接A", 1079.29, "20261012.jpg")
+    first["captured_at"] = "2026-10-12T22:45:55+08:00"
+    second = snapshot_row("017125", "华宝港股互联网ETF联接A", 1079.29, "20261013.jpg")
+    second["captured_at"] = "2026-10-13T13:36:24+08:00"
+
+    merged, report = merge_snapshot_inputs([snapshot(first), snapshot(second)])
+
+    assert len(merged["rows"]) == 1
+    assert report["duplicates_removed"] == 1
+    assert report["removed_duplicates"][0]["comparison"]["same_capture_day"] is False
+    assert report["removed_duplicates"][0]["comparison"]["status"] == "duplicate_removed"
+
+
+
+def test_clean_row_name_replaces_qdii_ocr_variants():
+    assert _clean_row_name("华宝致远混合（QD围A基金进阶理财定投") == "华宝致远混合(QDII)A"
+    assert _clean_row_name("银华海外数字经济量化选股混合（QDΧc") == "银华海外数字经济量化选股混合(QDII)C"
+    assert _clean_row_name("国泰纳斯达克100指数(QD围") == "国泰纳斯达克100指数(QDII)"
+
+
+def test_merge_keeps_one_latest_snapshot_per_fund_code():
+    left = {
+        "account": "蚂蚁财富",
+        "code": "008253",
+        "name": "华宝致远混合(QDII)A",
+        "market_value": 939.36,
+        "profit": -0.64,
+        "profit_pct": -0.07,
+        "captured_at": "2026-10-12T22:45:55+08:00",
+    }
+    right = {
+        **left,
+        "market_value": 949.34,
+        "profit": -0.66,
+        "captured_at": "2026-10-13T13:36:24+08:00",
+    }
+
+    merged, comparison = merge_snapshot_inputs([
+        {"account": "蚂蚁财富", "rows": [left], "source_images": ["left.jpg"]},
+        {"account": "蚂蚁财富", "rows": [right], "source_images": ["right.jpg"]},
+    ])
+
+    assert len(merged["rows"]) == 1
+    assert merged["rows"][0]["market_value"] == 949.34
+    assert comparison["removed_duplicates"][0]["comparison"]["status"] == "superseded_by_newer_snapshot"
