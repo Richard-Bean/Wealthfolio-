@@ -29,7 +29,9 @@ FinanceBot/
 └── logs/                     # 运行日志（支付宝基金导出.log）
 ```
 
-## 快速开始（支付宝 → Wealthfolio）
+## 开发者快速开始（支付宝交割单 PDF）
+
+普通用户处理持仓截图时，请回到项目根目录双击 `运行截图转CSV.bat`；以下命令用于处理交割单 PDF。
 
 ```bash
 cd FinanceBot   # 进入项目目录（若已在 FinanceBot/ 内则跳过）
@@ -39,7 +41,7 @@ pip install -r connectors/alipay/requirements.txt
 
 # 2. 把支付宝邮箱下载的交割单 PDF 放入 data/raw/alipay/（只放 1 份，文件名随意）
 
-# 3. 运行（或直接双击 connectors/alipay/运行.bat）
+# 3. 运行（在 FinanceBot/ 目录执行 python connectors/alipay/scripts/run.py）
 python connectors/alipay/scripts/run.py
 ```
 
@@ -66,7 +68,7 @@ python -m pytest tests/ -v
 | data/input | data/raw/alipay |
 | data/output | data/processed/alipay |
 | tests/test_pipeline.py | tests/connectors/alipay/test_pipeline.py |
-| 运行.bat | connectors/alipay/运行.bat |
+| 运行.bat | connectors/alipay/scripts/run.py（运行入口） |
 
 ## 截图基金名称映射
 

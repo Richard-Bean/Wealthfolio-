@@ -35,7 +35,7 @@ FinanceBot/docs/templates/持仓截图模板_打码.jpg
 运行截图转CSV.bat
 ```
 
-也可以把图片拖到 BAT 上。
+程序会一次处理输入目录中的全部支持图片。
 
 默认流程：
 
@@ -59,7 +59,7 @@ FinanceBot/docs/templates/持仓截图模板_打码.jpg
 - 持仓快照对比报告；
 - 待确认交易 CSV；
 - 已确认后续交易 CSV；
-- Wealthfolio 导入 CSV。
+- Wealthfolio 导入 CSV：`FinanceBot/data/export/wealthfolio_import_auto.csv`。
 
 #### 4. 人工复核
 
