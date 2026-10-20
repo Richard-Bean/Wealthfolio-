@@ -124,10 +124,10 @@ PENDING_HOLDINGS_HEADERS = {
     "current_pending_amount": "待处理金额",
     "pending_cost_basis": "待处理持仓成本",
     "current_pending_trade_times": "交易时间",
+    "share_confirmation_date": "份额确定日期",
     "estimated_nav_details": "适用净值明细",
     "determinable_pending_amount": "可估算金额",
     "pending_nav_missing_amount": "待净值金额",
-    "estimated_pending_quantity": "待处理份额",
     "share_calculation_status": "份额状态",
     "source_images": "来源截图",
     "transaction_rule": "份额计算规则",
@@ -277,6 +277,17 @@ def nav_for_trade(fund_nav: dict, trade_at: datetime) -> dict | None:
     return None
 
 
+def share_confirmation_date(trade_at: datetime) -> str:
+    """返回交易日后的第2个交易日（周一至周五，不含节假日）。"""
+    confirmation = trade_at.date()
+    remaining = 2
+    while remaining:
+        confirmation += timedelta(days=1)
+        if confirmation.weekday() < 5:
+            remaining -= 1
+    return confirmation.isoformat()
+
+
 def build_reconciliation(
     snapshot_captured_at: datetime,
     snapshot_rows: Dict[str, dict],
@@ -339,19 +350,28 @@ def build_reconciliation(
         determinable_orders: list[tuple[dict, dict]] = []
         missing_orders: list[dict] = []
         nav_details: list[str] = []
+        order_details: list[dict] = []
         for order in orders:
             target_date = scheduled_nav_date(order["_trade_at"])
             nav_item = nav_for_trade(fund_nav, order["_trade_at"])
+            nav_detail = (
+                f"{order['trade_time']} → 净值日{target_date.isoformat()}(待净值)"
+                if nav_item is None
+                else f"{order['trade_time']} → 净值日{nav_item['date']}({nav_item['nav']})"
+            )
+            nav_details.append(nav_detail)
+            order_details.append(
+                {
+                    "order": order,
+                    "nav_item": nav_item,
+                    "nav_detail": nav_detail,
+                    "share_confirmation_date": share_confirmation_date(order["_trade_at"]),
+                }
+            )
             if nav_item is None:
                 missing_orders.append(order)
-                nav_details.append(
-                    f"{order['trade_time']} → 净值日{target_date.isoformat()}(待净值)"
-                )
                 continue
             determinable_orders.append((order, nav_item))
-            nav_details.append(
-                f"{order['trade_time']} → 净值日{nav_item['date']}({nav_item['nav']})"
-            )
 
         determinable_amount = sum((order["_amount"] for order, _ in determinable_orders), ZERO)
         missing_amount = sum((order["_amount"] for order in missing_orders), ZERO)
@@ -437,8 +457,9 @@ def build_reconciliation(
                 ),
                 "transaction_rule": (
                     "15:00前下单使用当日净值，15:00及以后使用下一交易日净值；"
-                    "适用净值未发布时份额留空，不使用最新净值替代"
+                    "份额确定日期=交易日+2个交易日；适用净值未发布时份额留空，不使用最新净值替代"
                 ),
+                "pending_order_details": order_details,
             }
         )
 
@@ -450,7 +471,35 @@ def confirmed_holdings_rows(rows: List[dict]) -> List[dict]:
 
 
 def pending_holdings_rows(rows: List[dict]) -> List[dict]:
-    return [row for row in rows if int(row.get("current_pending_count") or 0) > 0]
+    """将基金汇总拆成按交易时间逐笔输出的待处理交易。"""
+    output: List[dict] = []
+    for row in rows:
+        for detail in row.get("pending_order_details", []):
+            order = detail["order"]
+            nav_item = detail["nav_item"]
+            amount = decimal_text(money(order["_amount"]))
+            output.append(
+                {
+                    "symbol": row["symbol"],
+                    "fund_name": row["fund_name"],
+                    "current_pending_count": 1,
+                    "current_pending_amount": amount,
+                    "pending_cost_basis": amount,
+                    "current_pending_trade_times": order["trade_time"],
+                    "share_confirmation_date": detail["share_confirmation_date"],
+                    "estimated_nav_details": detail["nav_detail"],
+                    "determinable_pending_amount": amount if nav_item is not None else "0.00",
+                    "pending_nav_missing_amount": "0.00" if nav_item is not None else amount,
+                    "share_calculation_status": (
+                        "已按交易时间对应净值估算"
+                        if nav_item is not None
+                        else "全部待净值，交易进行中份额已搁置"
+                    ),
+                    "source_images": order.get("source_image", ""),
+                    "transaction_rule": row["transaction_rule"],
+                }
+            )
+    return output
 
 
 def validate_reference(confirmed_rows: List[dict]) -> dict:
