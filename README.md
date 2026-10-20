@@ -3,9 +3,19 @@
 本仓库为**架构设计仓库**，包含：
 
 - `FinanceBot/` —— 金融账户同步到 Wealthfolio 的连接器项目；
-- `进度核查.md` —— 架构说明、实施进度、未完成任务和风险记录；
+- `docs/archive/2026-10-进度核查.md` —— 历史设计和实施记录归档；
 - `运行截图转CSV.bat` —— 从持仓截图生成 Wealthfolio CSV 的一键入口。
 
+## 项目文档
+
+- `AGENTS.md`：Agent 默认必读的稳定规则和上下文路由；
+- `STATUS.md`：当前进度、风险、未完成任务和阶段路线；
+- `docs/ARCHITECTURE.md`：系统架构、模块职责和设计决策；
+- `docs/DATA_SCHEMA.md`：统一数据模型和字段语义；
+- `docs/CONNECTOR_SPEC.md`：数据来源和 Connector 规范；
+- `docs/SECURITY.md`：安全、隐私和敏感数据边界；
+- `docs/OPERATIONS.md`：运行、测试、人工复核和故障排查；
+- `docs/archive/2026-10-进度核查.md`：历史归档，不参与日常维护。
 ## 数据接口结论
 
 **支付宝、银行和券商的个人账户 API 对本项目不可行。** 普通个人项目无法获得可合法、稳定、
